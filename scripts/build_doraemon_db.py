@@ -1,4 +1,6 @@
-
+import json
+import os
+import re
 
 try:
     with open('database/search_index.json') as f:
