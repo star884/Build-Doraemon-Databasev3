@@ -8,9 +8,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TOKEN = os.getenv('DISCORD_TOKEN')
-bot = commands.Bot(command_prefix='!', intents=discord.Intents.default())
-
 try:
     with open('database/search_index.json') as f:
         DB = json.load(f)
