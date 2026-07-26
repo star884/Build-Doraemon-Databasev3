@@ -358,5 +358,3 @@ async def on_ready():
     print(f'✅ Synced {len(synced)} GLOBAL commands')
     if bot.guilds:
         print(f'Bot is in {len(bot.guilds)} guild(s)')
-
-bot.run(TOKEN)
