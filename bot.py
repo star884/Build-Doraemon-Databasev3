@@ -29,6 +29,18 @@ if os.getenv('GITHUB_ACTIONS') == 'true':
 # ============================================
 # Configuration - Data Sources
 # ============================================
+
+# Termux Specific Configuration - Auto-detect home directory
+HOME_DIR = os.path.expanduser("~")
+print(f"🏠 Home directory detected: {HOME_DIR}")
+
+# Local CSV path for Termux (most reliable - no internet needed)
+CSV_LOCAL_PATH = os.path.join(HOME_DIR, "Doraemon-CSV-DB", "database") + "/"
+print(f"📂 CSV local path: {CSV_LOCAL_PATH}")
+
+# Option A: Live fetch (fallback if local fails)
+csv_raw_base_url = 'https://raw.githubusercontent.com/star884/Doraemon-CSV-DB/main/database/'
+
 current_source = {
     'id': 1,
     'name': 'JSON Database (Primary)',
@@ -37,10 +49,10 @@ current_source = {
     'files': ['database/search_index.json']
 }
 
-csv_raw_base_url = 'https://raw.githubusercontent.com/star884/Doraemon-CSV-DB/main/database/'
+# Global data storage with thread-safe lock
 csv_stories = []
 csv_data_loaded = False
-data_load_lock = asyncio.Lock()  # FIX #2: Add lock for thread safety
+data_load_lock = asyncio.Lock()  # FIX #2: Lock prevents race conditions
 
 available_sources = [
     {
@@ -52,15 +64,14 @@ available_sources = [
     },
     {
         'id': 2,
-        'name': 'CSV Database (Live Fetch)',
-        'url': csv_raw_base_url,
+        'name': 'CSV Database (Local Clone - Termux)',
+        'url': CSV_LOCAL_PATH,
         'type': 'csv',
         'files': ['story_index.csv', 'manga_details.csv'],
-        'fetch_method': 'github_api'
+        'fetch_method': 'local_file'
     }
 ]
 
-# Global data storage
 EPISODES = []
 DB = {}
 
@@ -78,36 +89,81 @@ def load_json_database():
         with open(db_path, encoding='utf-8') as f:
             DB = json.load(f)
         EPISODES = DB.get('items', [])
-        print(f'Loaded {len(EPISODES)} episodes from JSON database')
-        print(f'  Episodes with JP refs: {sum(1 for e in EPISODES if e.get("jp_story_numbers"))}')
+        print(f'✅ Loaded {len(EPISODES)} episodes from JSON database')
+        print(f'   Episodes with JP refs: {sum(1 for e in EPISODES if e.get("jp_story_numbers"))}')
         return True
     except FileNotFoundError:
         EPISODES = []
-        print('JSON database file not found at database/search_index.json')
+        print('⚠️ JSON database file not found at database/search_index.json')
         return False
     except json.JSONDecodeError as e:
         EPISODES = []
-        print(f'Invalid JSON in database file: {e}')
+        print(f'❌ Invalid JSON in database file: {e}')
         return False
     except Exception as e:
         EPISODES = []
-        print(f'Error loading JSON database: {e}')
+        print(f'❌ Error loading JSON database: {e}')
+        return False
+
+def load_csv_database_local(base_path):
+    """FIX #3: Load CSV data from local files (no internet required - Termux optimized)"""
+    global csv_stories, csv_data_loaded
+    
+    try:
+        print(f'📥 Loading CSV data from local path: {base_path}')
+        
+        # Verify directory exists
+        if not os.path.isdir(base_path):
+            print(f'❌ Directory not found: {base_path}')
+            print('💡 Run: git clone https://github.com/star884/Doraemon-CSV-DB.git ~/Doraemon-CSV-DB')
+            csv_stories = []
+            csv_data_loaded = False
+            return False
+        
+        story_file = os.path.join(base_path, 'story_index.csv')
+        
+        if not os.path.isfile(story_file):
+            print(f'❌ Story index not found at {story_file}')
+            csv_stories = []
+            csv_data_loaded = False
+            return False
+        
+        # Read CSV file directly from disk
+        with open(story_file, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            csv_stories = list(reader)
+        
+        csv_data_loaded = True
+        print(f'✅ Loaded {len(csv_stories)} stories from local CSV (offline mode)')
+        return True
+        
+    except PermissionError:
+        print(f'❌ Permission denied accessing: {base_path}')
+        csv_stories = []
+        csv_data_loaded = False
+        return False
+    except Exception as e:
+        print(f'❌ Error loading local CSV: {type(e).__name__}: {e}')
+        csv_stories = []
+        csv_data_loaded = False
         return False
 
 async def load_csv_database_live(source_url):
-    """Fetch CSV data LIVE from GitHub Raw URLs"""
+    """Fetch CSV data LIVE from GitHub Raw URLs (fallback option)"""
     global csv_stories, csv_data_loaded
     
-    # FIX #3: Check for aiohttp dependency
+    # FIX #4: Check for aiohttp dependency before use
     try:
         import aiohttp
     except ImportError:
-        print('ERROR: aiohttp not installed. Run: pip install aiohttp')
+        print('❌ ERROR: aiohttp not installed. Run: pip install aiohttp')
+        csv_stories = []
+        csv_data_loaded = False
         return False
     
-    async with data_load_lock:  # FIX #2: Lock during data loading
+    async with data_load_lock:
         try:
-            print('Fetching CSV data from GitHub...')
+            print('🌐 Fetching CSV data from GitHub...')
             
             story_url = csv_raw_base_url + 'story_index.csv'
             
@@ -120,21 +176,21 @@ async def load_csv_database_live(source_url):
                         csv_stories = list(reader)
                         
                         csv_data_loaded = True
-                        print(f'Loaded {len(csv_stories)} stories from CSV (GitHub live fetch)')
+                        print(f'✅ Loaded {len(csv_stories)} stories from CSV (online mode)')
                         return True
                     else:
-                        print(f'Failed to fetch CSV: HTTP {resp.status}')
+                        print(f'❌ Failed to fetch CSV: HTTP {resp.status}')
                         csv_stories = []
                         csv_data_loaded = False
                         return False
                         
         except asyncio.TimeoutError:
-            print('Timeout fetching CSV from GitHub')
+            print('⏱️ Timeout fetching CSV from GitHub')
             csv_stories = []
             csv_data_loaded = False
             return False
         except Exception as e:
-            print(f'Error fetching CSV: {e}')
+            print(f'❌ Error fetching CSV: {type(e).__name__}: {e}')
             csv_stories = []
             csv_data_loaded = False
             return False
@@ -169,39 +225,42 @@ def convert_csv_to_episode_format(csv_stories):
         episodes.append(ep)
     return episodes
 
-async def load_csv_database(source_url):
-    """Load CSV data - tries live fetch first"""
+async def load_csv_database(source_config):
+    """Unified loader - supports both local and remote CSV"""
     global EPISODES, csv_stories, csv_data_loaded
     
-    success = await load_csv_database_live(source_url)
+    fetch_method = source_config.get('fetch_method', 'github_api')
+    source_url = source_config['url']
+    
+    if fetch_method == 'local_file':
+        success = load_csv_database_local(source_url)
+        # Optional: fallback to remote if local fails
+        if not success:
+            print('💡 Local load failed, attempting remote fallback...')
+            success = await load_csv_database_live(csv_raw_base_url)
+    else:
+        success = await load_csv_database_live(source_url)
     
     if success:
         EPISODES = convert_csv_to_episode_format(csv_stories)
-        print(f'CSV database ready with {len(EPISODES)} stories')
+        print(f'✅ CSV database ready with {len(EPISODES)} stories')
         return True
     
-    return False
-
-def reload_current_source():
-    """FIX #4: Reload data from currently active source - proper async wrapper"""
-    loop = asyncio.get_event_loop()
-    if current_source['type'] == 'json':
-        return load_json_database()
-    elif current_source['type'] == 'csv':
-        return loop.run_until_complete(load_csv_database(current_source['url']))
     return False
 
 def check_csv_source():
     """Check if CSV source is available"""
     if not csv_data_loaded or len(csv_stories) == 0:
         embed = Embed(
-            title='CSV Not Available',
+            title='❌ CSV Not Available',
             description=(
                 'CSV database is not loaded.\n\n'
                 '**Possible causes:**\n'
-                '- No internet connection\n'
+                '- Directory not found: `~/Doraemon-CSV-DB/database/`\n'
+                '- No internet connection (for online mode)\n'
                 '- GitHub temporarily unavailable\n\n'
-                f'Current source: **{current_source["name"]}**'
+                f'**Current source:** **{current_source["name"]}**\n\n'
+                '**Fix:** Clone the repo:\n```\ngit clone https://github.com/star884/Doraemon-CSV-DB.git ~/Doraemon-CSV-DB\n```'
             ),
             color=0xcc0000
         )
@@ -213,15 +272,15 @@ def check_csv_source():
 # ============================================
 @bot.tree.command(name='source', description='Shows the current database source')
 async def source_cmd(interaction):
-    embed = Embed(title=f'Current Database Source', color=0x6d4aff)
+    embed = Embed(title=f'📊 Current Database Source', color=0x6d4aff)
     embed.add_field(name='Source Name', value=current_source['name'], inline=True)
     embed.add_field(name='Type', value=current_source['type'].title(), inline=True)
     
-    if 'http' in current_source['url']:
-        embed.add_field(name='URL', value=f'[Link]({current_source["url"]})', inline=False)
+    if 'http' in current_source['url'] or current_source['url'].startswith('/'):
+        embed.add_field(name='URL/Path', value=f'{current_source["url"][:50]}...', inline=False)
     
     if current_source['type'] == 'csv':
-        status = 'Loaded' if csv_data_loaded else 'Not loaded'
+        status = '✅ Loaded' if csv_data_loaded else '⏳ Not loaded'
         embed.add_field(name='Status', value=status, inline=True)
         embed.add_field(name='Records', value=str(len(csv_stories)), inline=True)
     elif current_source['type'] == 'json':
@@ -232,16 +291,16 @@ async def source_cmd(interaction):
 
 @bot.tree.command(name='source_all', description='Lists all available database sources')
 async def source_all_cmd(interaction):
-    embed = Embed(title='Available Database Sources', color=0x6d4aff)
+    embed = Embed(title='📚 Available Database Sources', color=0x6d4aff)
     
     description = ''
     for src in available_sources:
         desc = f'**{src["id"]}) {src["name"]}**\n'
-        desc += f'> Type: {src["type"].title()} | URL: {src["url"]}\n'
+        desc += f'> Type: {src["type"].title()} | Method: {src.get("fetch_method", "default").title()}\n'
         if src.get('files'):
             desc += f'> Files: {", ".join(src["files"])}\n'
         if src['id'] == current_source['id']:
-            desc += '> **Currently Active**\n'
+            desc += '> 🟢 **Currently Active**\n'
         description += desc + '\n'
     
     embed.description = description
@@ -256,7 +315,7 @@ async def source_change_cmd(interaction, source_id: int):
     source = next((s for s in available_sources if s['id'] == source_id), None)
     
     if not source:
-        embed = Embed(title='Invalid Source', 
+        embed = Embed(title='❌ Invalid Source', 
                      description=f'Source ID {source_id} not found.\nUse `/source all` to see available sources.',
                      color=0xcc0000)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -266,15 +325,15 @@ async def source_change_cmd(interaction, source_id: int):
     
     try:
         if source['type'] == 'csv':
-            success = await load_csv_database(source['url'])
+            success = await load_csv_database(source)
             if not success:
                 embed = Embed(
-                    title='Warning',
+                    title='⚠️ Warning',
                     description=(
-                        'Could not load CSV data from GitHub.\n\n'
+                        'Could not load CSV data.\n\n'
                         '**Troubleshooting:**\n'
-                        '- Check your internet connection\n'
-                        '- Verify: https://raw.githubusercontent.com/star884/Doraemon-CSV-DB/main/database/story_index.csv\n'
+                        '- Verify folder exists: `~/Doraemon-CSV-DB/database/`\n'
+                        '- Run: `git clone https://github.com/star884/Doraemon-CSV-DB.git ~/Doraemon-CSV-DB`\n'
                         '- Then switch back: `/source change 1`\n\n'
                         f'Reverting to previous source.'
                     ),
@@ -288,7 +347,7 @@ async def source_change_cmd(interaction, source_id: int):
         elif source['type'] == 'json':
             success = load_json_database()
             if not success:
-                embed = Embed(title='Warning',
+                embed = Embed(title='⚠️ Warning',
                              description='Could not load JSON data.\nReverting to previous source.',
                              color=0xffaa00)
                 await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -298,7 +357,7 @@ async def source_change_cmd(interaction, source_id: int):
                 current_source.update(source)
         
         record_count = len(csv_stories) if source['type'] == 'csv' else len(EPISODES)
-        embed = Embed(title='Source Changed Successfully', color=0x6d4aff)
+        embed = Embed(title='✅ Source Changed Successfully', color=0x6d4aff)
         embed.add_field(name='Previous Source', value=old_source['name'], inline=False)
         embed.add_field(name='New Source', value=source['name'], inline=False)
         embed.add_field(name='Records Loaded', value=str(record_count), inline=True)
@@ -306,9 +365,9 @@ async def source_change_cmd(interaction, source_id: int):
         await interaction.response.send_message(embed=embed)
         
     except Exception as e:
-        print(f'Error during source change: {e}')
+        print(f'❌ Error during source change: {e}')
         current_source.update(old_source)
-        embed = Embed(title='Error', 
+        embed = Embed(title='❌ Error', 
                      description=f'An error occurred while switching sources.\nError: {str(e)[:100]}',
                      color=0xcc0000)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -321,7 +380,7 @@ async def source_change_cmd(interaction, source_id: int):
 async def search_cmd(interaction, query: str):
     if not EPISODES:
         embed = Embed(
-            title='Database Empty',
+            title='⚠️ Database Empty',
             description='No episodes loaded. Use `/source` to check status.',
             color=0xcc0000
         )
@@ -384,7 +443,7 @@ async def search_cmd(interaction, query: str):
     
     if not results:
         embed = Embed(
-            title='No Results Found',
+            title='❌ No Results Found',
             description=f'No episodes found for "**{query}"\n\n'
             '**Supported formats:**\n'
             '- JP Story #: `150` or `jp:150`\n'
@@ -409,7 +468,7 @@ async def search_cmd(interaction, query: str):
     category = first.get('category', 'unknown').replace('_', ' ').title()
     title = first.get('title', 'Unknown')[:70]
     
-    embed = Embed(title=f'Episode Found: {title}', color=0x6d4aff)
+    embed = Embed(title=f'✅ Episode Found: {title}', color=0x6d4aff)
     embed.description = f'**Category:** {category}'
     embed.add_field(name='Indian Episode', value=in_ep, inline=True)
     if alt_ep:
@@ -433,7 +492,7 @@ async def search_cmd(interaction, query: str):
 async def jp_cmd(interaction, jp_number: str):
     if not EPISODES:
         embed = Embed(
-            title='Database Empty',
+            title='⚠️ Database Empty',
             description='No episodes loaded. Use `/source` to check status.',
             color=0xcc0000
         )
@@ -466,7 +525,7 @@ async def jp_cmd(interaction, jp_number: str):
     
     if not results:
         embed = Embed(
-            title='Not Found',
+            title='❌ Not Found',
             description=f'No episode found for JP Story #{jp_number}\n\n'
             f'**Current Source:** {current_source["name"]}',
             color=0xcc0000
@@ -475,7 +534,7 @@ async def jp_cmd(interaction, jp_number: str):
         return
     
     first = results[0]
-    embed = Embed(title=f'JP Story #{jp_number}', color=0x6d4aff)
+    embed = Embed(title=f'📘 JP Story #{jp_number}', color=0x6d4aff)
     embed.add_field(name='IN Episode', value=first.get('in_season_episode', 'N/A'), inline=True)
     embed.add_field(name='Category', value=first.get('category', 'unknown').replace('_', ' ').title(), inline=True)
     if first.get('alt_in_episode'):
@@ -497,7 +556,7 @@ async def jp_cmd(interaction, jp_number: str):
 async def list_cmd(interaction, page: int = 1, season: str = None):
     if not EPISODES:
         embed = Embed(
-            title='Database Empty',
+            title='⚠️ Database Empty',
             description='No episodes loaded. Use `/source` to check status.',
             color=0xcc0000
         )
@@ -525,7 +584,7 @@ async def list_cmd(interaction, page: int = 1, season: str = None):
     
     if page > total_pages:
         embed = Embed(
-            title='Page Not Found', 
+            title='❌ Page Not Found', 
             description=f'Page {page} does not exist. Valid pages: 1-{total_pages}\n**Current Source:** {current_source["name"]}', 
             color=0xcc0000
         )
@@ -537,7 +596,7 @@ async def list_cmd(interaction, page: int = 1, season: str = None):
     
     chunk = filtered[start:end]
     season_display = season if season else 'All'
-    embed = Embed(title=f'Doraemon Episodes - Page {page} ({season_display})', color=0x6d4aff)
+    embed = Embed(title=f'📋 Doraemon Episodes - Page {page} ({season_display})', color=0x6d4aff)
     embed.description = f'Total: **{len(filtered)}** | Showing {start + 1}-{end}'
     
     for r in chunk:
@@ -571,14 +630,14 @@ async def stats_cmd(interaction):
         if e.get('jp_has_standalone_specials'):
             jp_standalone += 1
     
-    embed = Embed(title='Database Statistics', color=0x6d4aff)
+    embed = Embed(title='📊 Database Statistics', color=0x6d4aff)
     embed.description = (
         f'**Total Episodes:** {len(EPISODES)}\n'
         f'**JP Indexed:** {with_jp}\n'
         f'**JP Special Stories (S suffix):** {jp_specials}\n'
         f'**JP Standalone Specials (S##):** {jp_standalone}\n\n'
         f'**Source:** {current_source["name"]} ({current_source["type"].title()})\n'
-        f'**URL:** {current_source["url"]}\n\n'
+        f'**URL/Path:** {current_source["url"][:60]}...\n\n'
         f'**Breakdown:**'
     )
     for cat, cnt in sorted(counts.items(), key=lambda x: -x[1]):
@@ -596,11 +655,11 @@ async def stats_cmd(interaction):
 # ============================================
 @bot.tree.command(name='help', description='Show available commands')
 async def help_cmd(interaction):
-    embed = Embed(title='Doraemon Search Bot Help', color=0x6d4aff)
+    embed = Embed(title='🤖 Doraemon Search Bot Help', color=0x6d4aff)
     
     csv_note = ''
     if current_source['type'] == 'csv' and csv_data_loaded:
-        csv_note = '(All CSV features enabled)\n\n'
+        csv_note = '(✅ All CSV features enabled - offline mode)\n\n'
     
     embed.description = f'''
 **Available Commands:**
@@ -628,7 +687,7 @@ async def help_cmd(interaction):
 **Current Source:** {current_source["name"]}
 **Total Records:** {len(EPISODES)}
 '''
-    embed.set_footer(text='Bidirectional Cross-Reference - CSV Features Available')
+    embed.set_footer(text='🎯 Bidirectional Cross-Reference - CSV Features Available')
     await interaction.response.send_message(embed=embed)
 
 # ============================================
@@ -647,14 +706,14 @@ async def search_jp_title_cmd(interaction, query: str):
     results = [s for s in csv_stories if q in s.get('Japanese title', '').lower() or q in s.get('English title', '').lower()]
     
     if not results:
-        embed = Embed(title='No Results Found',
+        embed = Embed(title='❌ No Results Found',
                      description=f'No stories found for "**{query}**"',
                      color=0xcc0000)
         await interaction.response.send_message(embed=embed)
         return
     
     first = results[0]
-    embed = Embed(title=f'JP Title Match: {first.get("English title", "Unknown")[:70]}',
+    embed = Embed(title=f'📘 JP Title Match: {first.get("English title", "Unknown")[:70]}',
                  color=0x6d4aff)
     embed.add_field(name='Japanese Title', value=first.get('Japanese title', 'N/A'), inline=False)
     embed.add_field(name='1979 Episode', value=first.get('1979 Anime Episode', 'N/A'), inline=True)
@@ -681,13 +740,13 @@ async def search_magazine_cmd(interaction, code: str):
     results = [s for s in csv_stories if code_upper in s.get('Magazine code', '').upper()]
     
     if not results:
-        embed = Embed(title='No Results Found',
+        embed = Embed(title='❌ No Results Found',
                      description=f'No stories found for magazine code "**{code.upper()}**"',
                      color=0xcc0000)
         await interaction.response.send_message(embed=embed)
         return
     
-    embed = Embed(title=f'Magazine: {code.upper()}', color=0x6d4aff)
+    embed = Embed(title=f'📰 Magazine: {code.upper()}', color=0x6d4aff)
     embed.description = f'Found **{len(results)}** stories'
     
     for story in results[:10]:
@@ -712,13 +771,13 @@ async def search_1979_cmd(interaction, episode: str):
     results = [s for s in csv_stories if episode in str(s.get('1979 Anime Episode', ''))]
     
     if not results:
-        embed = Embed(title='No Results Found',
+        embed = Embed(title='❌ No Results Found',
                      description=f'No stories found for 1979 anime episode "**{episode}**"',
                      color=0xcc0000)
         await interaction.response.send_message(embed=embed)
         return
     
-    embed = Embed(title=f'1979 Anime Ep {episode}', color=0x6d4aff)
+    embed = Embed(title=f'📺 1979 Anime Ep {episode}', color=0x6d4aff)
     embed.description = f'Found **{len(results)}** story/stories'
     
     for story in results[:10]:
@@ -744,13 +803,13 @@ async def search_2005_cmd(interaction, episode: str):
     results = [s for s in csv_stories if episode in str(s.get('2005 Anime Episode', ''))]
     
     if not results:
-        embed = Embed(title='No Results Found',
+        embed = Embed(title='❌ No Results Found',
                      description=f'No stories found for 2005 anime episode "**{episode}**"',
                      color=0xcc0000)
         await interaction.response.send_message(embed=embed)
         return
     
-    embed = Embed(title=f'2005 Anime Ep {episode}', color=0x6d4aff)
+    embed = Embed(title=f'📺 2005 Anime Ep {episode}', color=0x6d4aff)
     embed.description = f'Found **{len(results)}** story/stories'
     
     for story in results[:10]:
@@ -769,44 +828,55 @@ async def search_2005_cmd(interaction, episode: str):
 # ============================================
 @bot.event
 async def on_ready():
-    print(f'Logged in as {bot.user}')
-    print('Syncing slash commands...')
+    print(f'✅ Logged in as {bot.user}')
+    print('🔄 Syncing slash commands...')
     synced = await bot.tree.sync()
-    print(f'Synced {len(synced)} GLOBAL commands')
+    print(f'✅ Synced {len(synced)} GLOBAL commands')
     
     if bot.guilds:
-        print(f'Bot is in {len(bot.guilds)} guild(s)')
+        print(f'🏛️ Bot is in {len(bot.guilds)} guild(s)')
     
-    print('\nLoading initial database...')
+    print('\n🗄️ Loading initial database...')
     print(f'   Default source: {current_source["name"]} ({current_source["type"]})')
     
     success = load_json_database()
     if not success:
-        print('Initial database load failed. Bot will run with empty database.')
-        print('Use /source change 2 to load CSV (requires internet)')
+        print('⚠️ Initial database load failed. Bot will run with empty database.')
+        print('💡 Use /source change 2 to load CSV (local offline mode recommended)')
     else:
-        print(f'Database loaded successfully ({len(EPISODES)} records)')
+        print(f'✅ Database loaded successfully ({len(EPISODES)} records)')
     
-    print(f'\nStatus:')
-    print(f'   Core commands: OK')
-    print(f'   Source commands: OK')
-    print(f'   CSV features: Disabled (enable with /source change 2, requires internet)')
+    # Try loading CSV automatically if configured
+    if len([s for s in available_sources if s['id'] == 2]) > 0:
+        csv_source = available_sources[1]
+        print(f'\n💾 Attempting to load CSV from local path...')
+        csv_success = load_csv_database_local(CSV_LOCAL_PATH)
+        if csv_success:
+            print(f'✅ CSV loaded successfully ({len(csv_stories)} stories - offline mode ready)')
+        else:
+            print('⚠️ CSV not available (run /source change 2 when ready)')
+    
+    print(f'\n📊 Status:')
+    print(f'   Core commands: ✅ OK')
+    print(f'   Source commands: ✅ OK')
+    print(f'   CSV features: {"✅ Online/Offline ready" if csv_data_loaded else "⚠️ Disabled (/source change 2)"})')
+    print(f'\n✨ Bot is ready! Type `!help` in Discord for more info.')
 
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
-        await ctx.send('Command not found. Use `/help` to see available commands.')
+        await ctx.send('❌ Command not found. Use `/help` to see available commands.')
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send('Missing required argument. Use `/help` for usage information.')
+        await ctx.send('❌ Missing required argument. Use `/help` for usage information.')
     elif isinstance(error, app_commands.errors.CommandInvokeError):
-        print(f'Command invoke error: {error}')
-        await ctx.send('An internal error occurred. Please try again.')
+        print(f'❌ Command invoke error: {error}')
+        await ctx.send('❌ An internal error occurred. Please try again.')
     elif isinstance(error, commands.CheckFailure):
-        print(f'Check failure: {error}')
+        print(f'⚠️ Check failure: {error}')
     else:
-        print(f'Unhandled error: {error}')
+        print(f'❌ Unhandled error: {type(error).__name__}: {error}')
         try:
-            await ctx.send('An unexpected error occurred. Please contact the bot administrator.')
+            await ctx.send('❌ An unexpected error occurred. Please contact the bot administrator.')
         except:
             pass  # Ignore errors when sending error message
 
@@ -814,6 +884,17 @@ async def on_command_error(ctx, error):
 # MAIN EXECUTION
 # ============================================
 if __name__ == '__main__':
-    print('Starting Doraemon Search Bot...')
+    print('='*60)
+    print('🤖 Starting Doraemon Search Bot...')
+    print(f'📍 Running in: {HOME_DIR}')
+    print(f'🔑 Token: {"Set" if TOKEN else "NOT SET"}')
+    print('='*60)
     print('Press Ctrl+C to stop')
-    bot.run(TOKEN)
+    print()
+    
+    try:
+        bot.run(TOKEN)
+    except Exception as e:
+        print(f'❌ Fatal error starting bot: {type(e).__name__}: {e}')
+        print('💡 Check your DISCORD_TOKEN and permissions.')
+        exit(1)
