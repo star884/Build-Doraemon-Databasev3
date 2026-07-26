@@ -7,7 +7,18 @@ from discord import app_commands, Embed
 from discord.ext import commands
 from dotenv import load_dotenv
 from pathlib import Path
+# Prevent bot from starting in GitHub Actions
+if os.getenv('GITHUB_ACTIONS') == 'true':
+    print('⚠️ Running in GitHub Actions - Bot startup skipped')
+    print('   Run bot.py on your server separately')
+    exit(0)
 
+# Validate Discord token
+if not TOKEN:
+    print('❌ ERROR: DISCORD_TOKEN environment variable not set')
+    print('   The bot requires a Discord token to run.')
+    print('   Set DISCORD_TOKEN in your .env file or server environment.')
+    exit(1)
 load_dotenv()
 
 TOKEN = os.getenv('DISCORD_TOKEN')
