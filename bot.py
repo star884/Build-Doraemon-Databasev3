@@ -21,7 +21,7 @@ if not TOKEN:
     exit(1)
 load_dotenv()
 
-TOKEN = os.getenv('DISCORD_TOKEN')
+
 
 # ============================================
 # Source Management Configuration
