@@ -1,30 +1,31 @@
+# bot.py - COMPLETE Fixed Version With All Commands
 import discord
 import json
 import os
 import re
+import csv
 import asyncio
+from io import StringIO
 from discord import app_commands, Embed
 from discord.ext import commands
 from dotenv import load_dotenv
 from pathlib import Path
+
+# FIX #1: Load environment variables FIRST (critical!)
+load_dotenv()
+
+TOKEN = os.getenv('DISCORD_TOKEN')
+if not TOKEN:
+    print('❌ ERROR: DISCORD_TOKEN environment variable not set')
+    exit(1)
+
 # Prevent bot from starting in GitHub Actions
 if os.getenv('GITHUB_ACTIONS') == 'true':
     print('⚠️ Running in GitHub Actions - Bot startup skipped')
-    print('   Run bot.py on your server separately')
     exit(0)
 
-# Validate Discord token
-if not TOKEN:
-    print('❌ ERROR: DISCORD_TOKEN environment variable not set')
-    print('   The bot requires a Discord token to run.')
-    print('   Set DISCORD_TOKEN in your .env file or server environment.')
-    exit(1)
-load_dotenv()
-
-
-
 # ============================================
-# Source Management Configuration
+# Configuration - Data Sources
 # ============================================
 current_source = {
     'id': 1,
@@ -33,6 +34,11 @@ current_source = {
     'type': 'json',
     'files': ['database/search_index.json']
 }
+
+# CSV data fetched LIVE from GitHub (no local clone needed!)
+csv_raw_base_url = 'https://raw.githubusercontent.com/star884/Doraemon-CSV-DB/main/database/'
+csv_stories = []
+csv_data_loaded = False
 
 available_sources = [
     {
@@ -44,17 +50,17 @@ available_sources = [
     },
     {
         'id': 2,
-        'name': 'CSV Database (GitHub)',
-        'url': 'https://github.com/star884/Doraemon-CSV-DB/blob/main/database/',
+        'name': 'CSV Database (Live Fetch)',
+        'url': csv_raw_base_url,
         'type': 'csv',
-        'files': ['story_index.csv', 'manga_details.csv']
+        'files': ['story_index.csv', 'manga_details.csv'],
+        'fetch_method': 'github_api'
     }
 ]
 
 # Global data storage
 EPISODES = []
 DB = {}
-active_plugin = None
 
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.default())
 
@@ -65,7 +71,9 @@ def load_json_database():
     """Load data from local JSON database"""
     global EPISODES, DB
     try:
-        with open('database/search_index.json') as f:
+        db_path = 'database/search_index.json'
+        
+        with open(db_path, encoding='utf-8') as f:
             DB = json.load(f)
         EPISODES = DB.get('items', [])
         print(f'✅ Loaded {len(EPISODES)} episodes from JSON database')
@@ -80,111 +88,129 @@ def load_json_database():
         print(f'❌ Error loading JSON database: {e}')
         return False
 
-async def load_csv_database(source_url):
-    """Load data from CSV source via plugin"""
-    global EPISODES, active_plugin
+async def load_csv_database_live(source_url):
+    """FIX #2: Fetch CSV data LIVE from GitHub Raw URLs"""
+    global csv_stories, csv_data_loaded
     
     try:
-        # Check if CSV plugin already loaded
-        if active_plugin:
-            success = await active_plugin.parser.load_from_github(source_url)
-            if success:
-                EPISODES = active_plugin.parser.stories
-                return True
-            return False
+        print(f'🔄 Fetching CSV data from GitHub...')
         
-        # Try to import CSV plugin from external repo
-        csv_repo_path = Path('Doraemon-CSV-DB')
-        if csv_repo_path.exists():
-            import sys
-            sys.path.insert(0, str(csv_repo_path))
-            
-            from csv_plugin import CSVPlugin
-            
-            active_plugin = CSVPlugin()
-            success = await active_plugin.initialize(source_url)
-            
-            if success:
-                EPISODES = active_plugin.parser.stories
-                print(f'✅ Loaded {len(EPISODES)} stories from CSV database')
-                return True
-            else:
-                print('❌ Failed to load CSV database')
-                return False
-        else:
-            print('⚠️ CSV repository not found locally (Doraemon-CSV-DB/)')
-            print('   To enable CSV source, clone it: git clone https://github.com/star884/Doraemon-CSV-DB.git')
-            return False
-            
-    except ImportError as e:
-        print(f'⚠️ CSV plugin import failed: {e}')
-        print('   Make sure csv_plugin.py exists in Doraemon-CSV-DB/')
+        story_url = csv_raw_base_url + 'story_index.csv'
+        
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(story_url, timeout=30) as resp:
+                if resp.status == 200:
+                    content = await resp.text(encoding='utf-8')
+                    
+                    reader = csv.DictReader(StringIO(content))
+                    csv_stories = list(reader)
+                    
+                    csv_data_loaded = True
+                    print(f'✅ Loaded {len(csv_stories)} stories from CSV (GitHub live fetch)')
+                    return True
+                else:
+                    print(f'❌ Failed to fetch CSV: HTTP {resp.status}')
+                    return False
+                    
+    except asyncio.TimeoutError:
+        print('❌ Timeout fetching CSV from GitHub')
         return False
     except Exception as e:
-        print(f'❌ Error loading CSV database: {e}')
+        print(f'❌ Error fetching CSV: {e}')
         return False
 
-async def reload_current_source():
-    """Reload data from currently active source"""
-    global current_source, EPISODES
+def convert_csv_to_episode_format(csv_stories):
+    """Map CSV data to standard EPISODES format for compatibility"""
+    episodes = []
+    for story in csv_stories:
+        ep = {
+            'in_season_episode': story.get('1979 Anime Episode', story.get('2005 Anime Episode', 'N/A')),
+            'alt_in_episode': story.get('Alt Episode', ''),
+            'jp_story_numbers': story.get('Japanese Story #', ''),
+            'jp_story_all': story.get('Japanese Story #', ''),
+            'story_a': story.get('English title', story.get('Japanese title', '')),
+            'story_b': '',
+            'category': 'manga_stories',
+            'title': story.get('English title', ''),
+            'jp_parsed': [{
+                'number': story.get('Japanese Story #', ''),
+                'is_special': False,
+                'is_standalone_special': False
+            }] if story.get('Japanese Story #') else [],
+            'English title': story.get('English title', ''),
+            'Japanese title': story.get('Japanese title', ''),
+            'Publication date': story.get('Publication date', ''),
+            'Magazine code': story.get('Magazine code', ''),
+            '1979 Anime Episode': story.get('1979 Anime Episode', ''),
+            '2005 Anime Episode': story.get('2005 Anime Episode', '')
+        }
+        episodes.append(ep)
+    return episodes
+
+async def load_csv_database(source_url):
+    """Load CSV data - tries live fetch first"""
+    global EPISODES, csv_stories, csv_data_loaded
     
+    success = await load_csv_database_live(source_url)
+    
+    if success:
+        EPISODES = convert_csv_to_episode_format(csv_stories)
+        print(f'✅ CSV database ready with {len(EPISODES)} stories')
+        return True
+    
+    return False
+
+def reload_current_source():
+    """Reload data from currently active source"""
     if current_source['type'] == 'json':
         return load_json_database()
     elif current_source['type'] == 'csv':
-        return await load_csv_database(current_source['url'])
+        return asyncio.create_task(load_csv_database(current_source['url']))
     return False
 
 def check_csv_source():
-    """Check if CSV source is active, return tuple (is_active, error_embed)"""
-    if current_source['type'] != 'csv' or not active_plugin:
+    """Check if CSV source is available"""
+    if not csv_data_loaded or len(csv_stories) == 0:
         embed = Embed(
-            title="❌ Not Available",
-            description=f'This command only works with CSV database.\n\n'
-                       f'Current source: **{current_source["name"]}**\n\n'
-                       f'To enable CSV features:\n'
-                       f'1. Run `/source change 2`\n'
-                       f'2. Make sure Doraemon-CSV-DB/ is cloned locally',
+            title="❌ CSV Not Available",
+            description=(
+                'CSV database is not loaded.\n\n'
+                '**Possible causes:**\n'
+                '• No internet connection\n'
+                '• GitHub temporarily unavailable\n\n'
+                f'Current source: **{current_source["name"]}**'
+            ),
             color=0xcc0000
         )
         return False, embed
     return True, None
 
 # ============================================
-# Source Management Commands
+# SOURCE MANAGEMENT COMMANDS
 # ============================================
 @bot.tree.command(name='source', description='Shows the current database source')
 async def source_cmd(interaction):
-    embed = Embed(
-        title=f"📚 Current Database Source",
-        color=0x6d4aff
-    )
+    embed = Embed(title=f"📚 Current Database Source", color=0x6d4aff)
     embed.add_field(name='Source Name', value=current_source['name'], inline=True)
     embed.add_field(name='Type', value=current_source['type'].title(), inline=True)
     
     if 'http' in current_source['url']:
-        embed.add_field(name='URL', value=f"[{current_source['name']}]({current_source['url']})", inline=False)
-    else:
-        embed.add_field(name='URL', value=current_source['url'], inline=False)
+        embed.add_field(name='URL', value=f"[Link]({current_source['url']})", inline=False)
     
     if current_source['type'] == 'csv':
-        files = current_source.get('files', [])
-        if files:
-            embed.add_field(name='Files', value=', '.join(files), inline=False)
+        status = '✅ Loaded' if csv_data_loaded else '⏸️ Not loaded'
+        embed.add_field(name='Status', value=status, inline=True)
+        embed.add_field(name='Records', value=str(len(csv_stories)), inline=True)
     elif current_source['type'] == 'json':
-        files = current_source.get('files', [])
-        if files:
-            embed.add_field(name='Main File', value=files[0], inline=False)
+        embed.add_field(name='Total Episodes', value=str(len(EPISODES)), inline=True)
     
     embed.set_footer(text=f'Source ID: {current_source["id"]} | Switch with /source change <id>')
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name='source_all', description='Lists all available database sources')
 async def source_all_cmd(interaction):
-    embed = Embed(
-        title="📚 Available Database Sources",
-        color=0x6d4aff
-    )
-    
+    embed = Embed(title="📚 Available Database Sources", color=0x6d4aff)
     description = ""
     for src in available_sources:
         desc = f"**{src['id}) {src['name']}**\n"
@@ -196,11 +222,9 @@ async def source_all_cmd(interaction):
         description += desc + "\n"
     
     embed.description = description
-    embed.add_field(
-        name="💡 How to switch",
-        value="Use `/source change <number>` to switch to a different source\nExample: `/source change 2`",
-        inline=False
-    )
+    embed.add_field(name="💡 How to switch", 
+                   value="Use `/source change <number>` to switch\nExample: `/source change 2`",
+                   inline=False)
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name='source_change', description='Changes the active database source')
@@ -209,72 +233,52 @@ async def source_change_cmd(interaction, source_id: int):
     source = next((s for s in available_sources if s['id'] == source_id), None)
     
     if not source:
-        embed = Embed(
-            title="❌ Invalid Source",
-            description=f'Source ID {source_id} not found.\nUse `/source all` to see available sources.',
-            color=0xcc0000
-        )
+        embed = Embed(title="❌ Invalid Source", 
+                     description=f'Source ID {source_id} not found.\nUse `/source all` to see available sources.',
+                     color=0xcc0000)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
     old_source = current_source.copy()
     current_source.update(source)
     
-    # Load data from new source
     if source['type'] == 'csv':
-        # Check if CSV repo exists locally
-        if not Path('Doraemon-CSV-DB').exists():
-            embed = Embed(
-                title="⚠️ CSV Repository Not Found",
-                description=f'To use the CSV source, clone the repository first:\n\n'
-                f'```bash\ngit clone https://github.com/star884/Doraemon-CSV-DB.git\n```\n\n'
-                f'Then run `/source change 2` again.',
-                color=0xffaa00
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            # Revert source
-            current_source.update(old_source)
-            return
-        
         success = await load_csv_database(source['url'])
         if not success:
             embed = Embed(
                 title="⚠️ Warning",
-                description=f'Switched to {source["name"]}, but failed to load CSV data.\nCommands may not work correctly until data is loaded.',
+                description=(
+                    'Could not load CSV data from GitHub.\n\n'
+                    '**Troubleshooting:**\n'
+                    '• Check your internet connection\n'
+                    '• Verify: https://raw.githubusercontent.com/star884/Doraemon-CSV-DB/main/database/story_index.csv\n'
+                    '• Then switch back: `/source change 1`'
+                ),
                 color=0xffaa00
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
+            current_source.update(old_source)
             return
     elif source['type'] == 'json':
         success = load_json_database()
         if not success:
-            embed = Embed(
-                title="⚠️ Warning",
-                description=f'Switched to {source["name"]}, but failed to load JSON data.',
-                color=0xffaa00
-            )
+            embed = Embed(title="⚠️ Warning",
+                         description='Could not load JSON data.',
+                         color=0xffaa00)
             await interaction.response.send_message(embed=embed, ephemeral=True)
+            current_source.update(old_source)
             return
     
-    embed = Embed(
-        title="✅ Source Changed Successfully",
-        color=0x6d4aff
-    )
+    record_count = len(csv_stories) if source['type'] == 'csv' else len(EPISODES)
+    embed = Embed(title="✅ Source Changed Successfully", color=0x6d4aff)
     embed.add_field(name='Previous Source', value=old_source['name'], inline=False)
     embed.add_field(name='New Source', value=source['name'], inline=False)
-    embed.add_field(name='URL', value=source['url'], inline=False)
-    
-    if source['type'] == 'csv':
-        embed.add_field(name='Loaded Files', value=', '.join(source.get('files', [])), inline=True)
-        embed.add_field(name='Total Stories', value=str(len(EPISODES)), inline=True)
-    elif source['type'] == 'json':
-        embed.add_field(name='Total Episodes', value=str(len(EPISODES)), inline=True)
-    
-    embed.set_footer(text=f'Refresh commands automatically • Use /source to view current')
+    embed.add_field(name='Records Loaded', value=str(record_count), inline=True)
+    embed.set_footer(text='Use /source to view current')
     await interaction.response.send_message(embed=embed)
 
 # ============================================
-# Original Search Commands (Preserved)
+# SEARCH COMMANDS (FROM ORIGINAL BOT.PY)
 # ============================================
 @bot.tree.command(name='search', description='Advanced search by JP story #, IN episode, SPE, or CE')
 @app_commands.describe(query='Search term (e.g., 150, 150 S, S16, s04e35, spe01, ce1, nobita)')
@@ -516,174 +520,22 @@ async def stats_cmd(interaction):
     for cat, cnt in sorted(counts.items(), key=lambda x: -x[1]):
         embed.add_field(name=cat.replace('_', ' ').title(), value=f'**{cnt}**', inline=True)
     
-    if current_source['type'] == 'csv' and active_plugin:
-        stats = active_plugin.get_statistics()
-        embed.add_field(name='CSV Columns Defined', value=str(stats.get('columns_defined', 0)), inline=True)
+    if current_source['type'] == 'csv' and csv_data_loaded:
+        embed.add_field(name='CSV Rows', value=str(len(csv_stories)), inline=True)
     
-    embed.set_footer(text=f'Generated: {DB.get("metadata", {}).get("generated_at", "unknown")}')
-    
-    await interaction.response.send_message(embed=embed)
-
-# ============================================
-# CSV-Specific Commands (NEW!)
-# ============================================
-@bot.tree.command(name='search_jp_title', description='Search by Japanese title (CSV only)')
-@app_commands.describe(query='Japanese title or keyword')
-async def search_jp_title_cmd(interaction, query: str):
-    """Search stories by Japanese title - CSV source only"""
-    is_available, error_embed = check_csv_source()
-    if not is_available:
-        await interaction.response.send_message(embed=error_embed)
-        return
-    
-    results = active_plugin.search_jp(query)
-    
-    if not results:
-        embed = Embed(
-            title="❌ No Results Found",
-            description=f'No stories found for Japanese title "**{query}**"',
-            color=0xcc0000
-        )
-        await interaction.response.send_message(embed=embed)
-        return
-    
-    first = results[0]
-    embed = active_plugin.create_search_embed(first, source_name=current_source['name'])
-    embed.title = f"🇯🇵 JP Title Match: {first.get('English title', 'Unknown')[:70]}"
-    
-    if len(results) > 1:
-        additional = [f"• {r.get('Publication date', '?')}: {r.get('English title', '?')[:40]}" for r in results[1:5]]
-        embed.add_field(name=f'➕ More Matches ({len(results)-1})', value='\n'.join(additional), inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name='search_magazine', description='Search by magazine code (CSV only)')
-@app_commands.describe(code='Magazine code (e.g., YK, KG, G1, G2, SD, TK, CC)')
-async def search_magazine_cmd(interaction, code: str):
-    """Search stories by magazine code - CSV source only"""
-    is_available, error_embed = check_csv_source()
-    if not is_available:
-        await interaction.response.send_message(embed=error_embed)
-        return
-    
-    results = active_plugin.parser.search_by_magazine(code.upper())
-    
-    if not results:
-        embed = Embed(
-            title="❌ No Results Found",
-            description=f'No stories found for magazine code "**{code.upper()}**"',
-            color=0xcc0000
-        )
-        await interaction.response.send_message(embed=embed)
-        return
-    
-    embed = Embed(
-        title=f"📰 Magazine: {code.upper()}",
-        color=0x6d4aff
-    )
-    embed.description = f"Found **{len(results)}** stories from this magazine"
-    
-    chunk = results[:10]
-    for story in chunk:
-        title = story.get('English title', 'Unknown')[:50]
-        date = story.get('Publication date', '?')
-        desc = f"**{date}** — {title}"
-        embed.add_field(name=desc, value="", inline=False)
-    
-    if len(results) > 10:
-        embed.set_footer(text=f'Showing 10 of {len(results)} results')
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name='search_1979', description='Search by 1979 anime episode number (CSV only)')
-@app_commands.describe(episode='Episode number (e.g., 1020, 150, 1234)')
-async def search_1979_cmd(interaction, episode: str):
-    """Search stories by 1979 anime episode - CSV source only"""
-    is_available, error_embed = check_csv_source()
-    if not is_available:
-        await interaction.response.send_message(embed=error_embed)
-        return
-    
-    results = active_plugin.search_anime_1979(episode)
-    
-    if not results:
-        embed = Embed(
-            title="❌ No Results Found",
-            description=f'No stories adapted in 1979 anime episode "**{episode}**"',
-            color=0xcc0000
-        )
-        await interaction.response.send_message(embed=embed)
-        return
-    
-    embed = Embed(
-        title=f"📺 1979 Anime Ep {episode}",
-        color=0x6d4aff
-    )
-    embed.description = f"Found **{len(results)}** story/stories adapted in this episode"
-    
-    chunk = results[:10]
-    for story in chunk:
-        title = story.get('English title', 'Unknown')[:50]
-        jp = story.get('Japanese title', '')[:30]
-        desc = f"• {title}"
-        if jp:
-            desc += f" ({jp})"
-        embed.add_field(name=desc, value="", inline=False)
-    
-    if len(results) > 10:
-        embed.set_footer(text=f'Showing 10 of {len(results)} results')
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name='search_2005', description='Search by 2005 anime episode number (CSV only)')
-@app_commands.describe(episode='Episode number (e.g., 1020, 150, 1234)')
-async def search_2005_cmd(interaction, episode: str):
-    """Search stories by 2005 anime episode - CSV source only"""
-    is_available, error_embed = check_csv_source()
-    if not is_available:
-        await interaction.response.send_message(embed=error_embed)
-        return
-    
-    results = active_plugin.search_anime_2005(episode)
-    
-    if not results:
-        embed = Embed(
-            title="❌ No Results Found",
-            description=f'No stories adapted in 2005 anime episode "**{episode}**"',
-            color=0xcc0000
-        )
-        await interaction.response.send_message(embed=embed)
-        return
-    
-    embed = Embed(
-        title=f"📺 2005 Anime Ep {episode}",
-        color=0x6d4aff
-    )
-    embed.description = f"Found **{len(results)}** story/stories adapted in this episode"
-    
-    chunk = results[:10]
-    for story in chunk:
-        title = story.get('English title', 'Unknown')[:50]
-        jp = story.get('Japanese title', '')[:30]
-        desc = f"• {title}"
-        if jp:
-            desc += f" ({jp})"
-        embed.add_field(name=desc, value="", inline=False)
-    
-    if len(results) > 10:
-        embed.set_footer(text=f'Showing 10 of {len(results)} results')
+    embed.set_footer(text=f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")} | Source: {current_source["name"]}')
     
     await interaction.response.send_message(embed=embed)
 
 # ============================================
-# Help Command
+# HELP COMMAND
 # ============================================
 @bot.tree.command(name='help', description='Show available commands')
 async def help_cmd(interaction):
     embed = Embed(title='🤖 Doraemon Search Bot Help', color=0x6d4aff)
     
     csv_note = ""
-    if current_source['type'] == 'csv':
+    if current_source['type'] == 'csv' and csv_data_loaded:
         csv_note = "**(All CSV features enabled)**\n\n"
     
     embed.description = f'''
@@ -711,56 +563,169 @@ async def help_cmd(interaction):
 
 **Current Source:** {current_source["name"]}
 **Total Records:** {len(EPISODES)}
-
-**JP Story Number Formats:**
-• `1313` - Regular story #1313
-• `1313 S` - Story #1313 marked as special
-• `S16` - Standalone special #16 (S01-S30)
-
-**Search Examples:**
-• `/search 150` - Find JP Story #150
-• `/search 150 S` - Find ONLY the special variant
-• `/search S16` - Find JP Standalone Special #16
-• `/search s04e35` - Find IN Episode S04E35
-• `/search nobita` - Search by story title
-
-**CSV Examples:**
-• `/search_jp_title のび太` - Search by Japanese title
-• `/search_magazine G1` - Find stories from Weekly Shonen Magazine G1
-• `/search_1979 1234` - Find stories in 1979 anime episode 1234
-• `/search_2005 567` - Find stories in 2005 anime episode 567
 '''
     embed.set_footer(text='🇯🇵 ↔ 🇮🇳 Bidirectional Cross-Reference • CSV Features Available')
     await interaction.response.send_message(embed=embed)
 
 # ============================================
-# Event Handlers
+# CSV-SPECIFIC COMMANDS (Live-Fetch Version)
+# ============================================
+@bot.tree.command(name='search_jp_title', description='Search by Japanese title (CSV only)')
+@app_commands.describe(query='Japanese title or keyword')
+async def search_jp_title_cmd(interaction, query: str):
+    """Search stories by Japanese title - CSV source only"""
+    is_available, error_embed = check_csv_source()
+    if not is_available:
+        await interaction.response.send_message(embed=error_embed)
+        return
+    
+    q = query.lower()
+    results = [s for s in csv_stories if q in s.get('Japanese title', '').lower() or q in s.get('English title', '').lower()]
+    
+    if not results:
+        embed = Embed(title="❌ No Results Found",
+                     description=f'No stories found for Japanese title "**{query}**"',
+                     color=0xcc0000)
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    first = results[0]
+    embed = Embed(title=f"🇯🇵 JP Title Match: {first.get('English title', 'Unknown')[:70]}",
+                 color=0x6d4aff)
+    embed.add_field(name='Japanese Title', value=first.get('Japanese title', 'N/A'), inline=False)
+    embed.add_field(name='1979 Episode', value=first.get('1979 Anime Episode', 'N/A'), inline=True)
+    embed.add_field(name='2005 Episode', value=first.get('2005 Anime Episode', 'N/A'), inline=True)
+    embed.add_field(name='Magazine', value=first.get('Magazine code', 'N/A'), inline=True)
+    embed.add_field(name='Publication Date', value=first.get('Publication date', 'N/A'), inline=True)
+    
+    if len(results) > 1:
+        additional = [f"• {r.get('English title', '?')[:40]}" for r in results[1:5]]
+        embed.add_field(name=f'➕ More Matches ({len(results)-1})', value='\n'.join(additional), inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name='search_magazine', description='Search by magazine code (CSV only)')
+@app_commands.describe(code='Magazine code (e.g., YK, KG, G1, G2, SD, TK, CC)')
+async def search_magazine_cmd(interaction, code: str):
+    """Search stories by magazine code - CSV source only"""
+    is_available, error_embed = check_csv_source()
+    if not is_available:
+        await interaction.response.send_message(embed=error_embed)
+        return
+    
+    code_upper = code.upper()
+    results = [s for s in csv_stories if code_upper in s.get('Magazine code', '').upper()]
+    
+    if not results:
+        embed = Embed(title="❌ No Results Found",
+                     description=f'No stories found for magazine code "**{code.upper()}**"',
+                     color=0xcc0000)
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    embed = Embed(title=f"📰 Magazine: {code.upper()}", color=0x6d4aff)
+    embed.description = f"Found **{len(results)}** stories"
+    
+    for story in results[:10]:
+        title = story.get('English title', 'Unknown')[:50]
+        date = story.get('Publication date', '?')
+        embed.add_field(name=f"{date} — {title}", value="", inline=False)
+    
+    if len(results) > 10:
+        embed.set_footer(text=f'Showing 10 of {len(results)} results')
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name='search_1979', description='Search by 1979 anime episode number (CSV only)')
+@app_commands.describe(episode='Episode number (e.g., 1020, 150, 1234)')
+async def search_1979_cmd(interaction, episode: str):
+    """Search stories by 1979 anime episode - CSV source only"""
+    is_available, error_embed = check_csv_source()
+    if not is_available:
+        await interaction.response.send_message(embed=error_embed)
+        return
+    
+    results = [s for s in csv_stories if episode in str(s.get('1979 Anime Episode', ''))]
+    
+    if not results:
+        embed = Embed(title="❌ No Results Found",
+                     description=f'No stories found for 1979 anime episode "**{episode}**"',
+                     color=0xcc0000)
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    embed = Embed(title=f"📺 1979 Anime Ep {episode}", color=0x6d4aff)
+    embed.description = f"Found **{len(results)}** story/stories"
+    
+    for story in results[:10]:
+        title = story.get('English title', 'Unknown')[:50]
+        jp = story.get('Japanese title', '')[:30]
+        desc = f"• {title}" + (f" ({jp})" if jp else "")
+        embed.add_field(name=desc, value="", inline=False)
+    
+    if len(results) > 10:
+        embed.set_footer(text=f'Showing 10 of {len(results)} results')
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name='search_2005', description='Search by 2005 anime episode number (CSV only)')
+@app_commands.describe(episode='Episode number (e.g., 1020, 150, 1234)')
+async def search_2005_cmd(interaction, episode: str):
+    """Search stories by 2005 anime episode - CSV source only"""
+    is_available, error_embed = check_csv_source()
+    if not is_available:
+        await interaction.response.send_message(embed=error_embed)
+        return
+    
+    results = [s for s in csv_stories if episode in str(s.get('2005 Anime Episode', ''))]
+    
+    if not results:
+        embed = Embed(title="❌ No Results Found",
+                     description=f'No stories found for 2005 anime episode "**{episode}**"',
+                     color=0xcc0000)
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    embed = Embed(title=f"📺 2005 Anime Ep {episode}", color=0x6d4aff)
+    embed.description = f"Found **{len(results)}** story/stories"
+    
+    for story in results[:10]:
+        title = story.get('English title', 'Unknown')[:50]
+        jp = story.get('Japanese title', '')[:30]
+        desc = f"• {title}" + (f" ({jp})" if jp else "")
+        embed.add_field(name=desc, value="", inline=False)
+    
+    if len(results) > 10:
+        embed.set_footer(text=f'Showing 10 of {len(results)} results')
+    
+    await interaction.response.send_message(embed=embed)
+
+# ============================================
+# EVENT HANDLERS
 # ============================================
 @bot.event
 async def on_ready():
     print(f'✅ Logged in as {bot.user}')
+    print('🔄 Syncing slash commands...')
     synced = await bot.tree.sync()
     print(f'✅ Synced {len(synced)} GLOBAL commands')
+    
     if bot.guilds:
         print(f'Bot is in {len(bot.guilds)} guild(s)')
     
-    # Load initial data
     print('\n🔄 Loading initial database...')
     print(f'   Default source: {current_source["name"]} ({current_source["type"]})')
     
-    success = await reload_current_source()
+    success = load_json_database()  # Start with JSON
     if not success:
-        print('⚠️ Initial database load failed. Some commands may not work.')
-        print('   If using JSON: Check that database/search_index.json exists')
-        print('   If using CSV: Clone Doraemon-CSV-DB first')
+        print('⚠️ Initial database load failed.')
     else:
         print(f'✅ Database loaded successfully ({len(EPISODES)} records)')
     
-    # Check for CSV-specific commands availability
-    print(f'\n📊 Available Commands:')
+    print(f'\n📊 Status:')
     print(f'   Core commands: ✅')
     print(f'   Source commands: ✅')
-    print(f'   CSV-specific commands: {"✅" if current_source["type"] == "csv" else "⏸️ (enable with /source change 2)"}')
+    print(f'   CSV features: ⏸️ (enable with /source change 2, requires internet)')
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -775,7 +740,7 @@ async def on_command_error(ctx, error):
         print(f'Error: {error}')
 
 # ============================================
-# Main Execution
+# MAIN EXECUTION
 # ============================================
 if __name__ == '__main__':
     bot.run(TOKEN)
