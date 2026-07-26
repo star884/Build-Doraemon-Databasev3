@@ -1,351 +1,242 @@
+#!/usr/bin/env python3
+"""
+build_database.py - Builds Doraemon episode database using Playwright scraping.
+For GitHub Actions CI/CD only - does NOT run Discord bot.
+"""
 import json
 import os
 import re
-
-try:
-    with open('database/search_index.json') as f:
-        DB = json.load(f)
-    EPISODES = DB.get('items', [])
-    print(f'✅ Loaded {len(EPISODES)} episodes from database')
-    print(f'   Episodes with JP refs: {sum(1 for e in EPISODES if e.get("jp_story_numbers"))}')
-except FileNotFoundError:
-    EPISODES = []
-    print('❌ Database file not found')
+from datetime import datetime
+from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
 
 
-def parse_jp_query(raw_query):
+def parse_jp_numbers(jp_raw):
     """
-    Parse a user's JP search query into structured components.
-
-    Returns dict with:
-      - number: the numeric part (str)
-      - wants_special_only: True if user specified 'S' suffix (e.g. "1020 S")
-      - is_standalone: True if standalone special (e.g. "S16")
-
-    Handles:
-      "1020"       → {number: "1020", wants_special_only: False, is_standalone: False}
-      "1020 s"     → {number: "1020", wants_special_only: True,  is_standalone: False}
-      "1020s"      → {number: "1020", wants_special_only: True,  is_standalone: False}
-      "s16"        → {number: "16",   wants_special_only: False, is_standalone: True}
-      "jp:1020 s"  → strips "jp:" prefix first
-      "jp:1020"    → {number: "1020", wants_special_only: False, is_standalone: False}
+    Parse JP story references into structured format.
+    
+    Returns list of dicts:
+    [
+      {'number': '1020', 'is_special': False, 'is_standalone_special': False},
+      {'number': '16', 'is_special': False, 'is_standalone_special': True},  # S16
+    ]
     """
-    q = raw_query.strip().lower()
-    q = q.replace('jp:', '')  # strip prefix if present
-
-    # Standalone special: S16, s16
-    m = re.match(r'^s(\d+)$', q, re.I)
-    if m:
-        return {'number': m.group(1), 'wants_special_only': False, 'is_standalone': True}
-
-    # Regular number with optional S suffix: 1020, 1020 s, 1020s
-    m = re.match(r'^(\d+)\s*s?$', q, re.I)
-    if m:
-        has_s = bool(re.search(r's\s*$', q, re.I))
-        return {'number': m.group(1), 'wants_special_only': has_s, 'is_standalone': False}
-
-    return None
-
-
-def search_jp(query_str, episodes):
-    """
-    Shared JP search logic used by both /search and /jp commands.
-    Returns list of matching episode dicts.
-    """
-    parsed = parse_jp_query(query_str)
-    if not parsed:
-        return []
-
-    target_num = parsed['number']
-    wants_special_only = parsed['wants_special_only']
-    is_standalone = parsed['is_standalone']
-    results = []
-
-    for ep in episodes:
-        jp_list = ep.get('jp_parsed', [])
-        for jp in jp_list:
-            # Must match the number
-            if jp.get('number') != target_num:
-                continue
-
-            if is_standalone:
-                # User searched "S16" — only match standalone specials
-                if jp.get('is_standalone_special'):
-                    results.append(ep)
-                    break
-            elif wants_special_only:
-                # User searched "1020 S" — only match stories with S suffix (not standalone)
-                if jp.get('is_special') and not jp.get('is_standalone_special'):
-                    results.append(ep)
-                    break
-            else:
-                # User searched "1020" — match ANY story with number 1020
-                results.append(ep)
-                break
-
-    return results
+    cleaned = re.sub(r'[^\w\s/]', '', jp_raw)
+    tokens = re.split(r'[\s/\-,]+', cleaned)
+    parsed = []
+    
+    for token in tokens:
+        if not token:
+            continue
+        
+        # Standalone special: S16, s16
+        if re.match(r'^s\d+$', token, re.I):
+            parsed.append({
+                'number': re.search(r'\d+', token).group(0),
+                'is_special': False,
+                'is_standalone_special': True
+            })
+        # Regular number, possibly with S suffix: 1020, 1020S, 1020 s
+        elif re.match(r'^\d+\s*s*$', token, re.I):
+            has_s_suffix = bool(re.search(r's\s*$', token, re.I))
+            parsed.append({
+                'number': re.search(r'\d+', token).group(0),
+                'is_special': has_s_suffix,
+                'is_standalone_special': False
+            })
+    
+    return parsed
 
 
-@bot.tree.command(name='search', description='Advanced search by JP story #, IN episode, SPE, or CE')
-@app_commands.describe(query='Search term (e.g., 150, 1020 S, s04e35, spe01, ce1, S16, nobita)')
-async def search_cmd(interaction, query: str):
-    q = query.lower().strip()
-    results = []
-    search_type = None
-
-    # --- JP Story Number search ---
-    # Trigger if: starts with jp:, OR is digits optionally followed by S, OR is S+digits
-    is_jp_query = (
-        q.startswith('jp:')
-        or re.match(r'^\d+\s*s?$', q)        # "1020", "1020 s", "1020s"
-        or re.match(r'^s\d+$', q)             # "s16"
-    )
-
-    if is_jp_query:
-        search_type = 'jp'
-        results = search_jp(q, EPISODES)
-
-    # --- IN Episode (S01E01 format) ---
-    elif re.match(r'^s\d{2}e\d{2}$', q):
-        search_type = 'in_episode'
-        results = [e for e in EPISODES if e.get('in_season_episode', '').lower() == q]
-
-    # --- Special Episodes (SPE##) ---
-    elif q.startswith('spe'):
-        search_type = 'special'
-        spe_num = re.sub(r'[^0-9]', '', q.replace('spe', ''))
-        results = [e for e in EPISODES if e.get('in_season_episode', '').upper().startswith('SPE') and spe_num in e.get('in_season_episode', '')]
-
-    # --- Classic Episodes (CE##) ---
-    elif q.startswith('ce') or q.startswith('classic'):
-        search_type = 'classic'
-        ce_num = re.sub(r'[^0-9]', '', q.replace('ce', '').replace('classic', ''))
-        results = [e for e in EPISODES if e.get('in_season_episode', '').upper().startswith('CE') and ce_num in e.get('in_season_episode', '')]
-
-    # --- Fallback: Title search (only if JP search wasn't attempted) ---
-    if not results and search_type != 'jp':
-        search_type = 'title'
-        for ep in EPISODES:
-            story_a = ep.get('story_a', '').lower()
-            story_b = ep.get('story_b', '').lower() if ep.get('story_b') else ''
-            if q in story_a or q in story_b:
-                results.append(ep)
-        results = results[:5]
-
-    if not results:
-        embed = Embed(
-            title="❌ No Results Found",
-            description=f'No episodes found for "**{query}**"\n\n'
-                        '**Supported formats:**\n'
-                        '• JP Story #: `150` or `jp:150`\n'
-                        '• JP Special Story: `1020 S` or `jp:1020 S`\n'
-                        '• JP Standalone Special: `S16`\n'
-                        '• IN Episode: `s04e35`\n'
-                        '• Special: `spe01` or `spe1`\n'
-                        '• Classic: `ce1` or `classic1`\n'
-                        '• Title: `nobita`',
-            color=0xcc0000
-        )
-        await interaction.response.send_message(embed=embed)
-        return
-
-    first = results[0]
-    in_ep = first.get('in_season_episode', 'N/A')
-    alt_ep = first.get('alt_in_episode')
-    jp_display = first.get('jp_story_all', 'Not indexed')
-    story_a = first.get('story_a', 'Unknown')
-    story_b = first.get('story_b')
-    category = first.get('category', 'unknown').replace('_', ' ').title()
-    title = first.get('title', 'Unknown')[:70]
-
-    embed = Embed(title=f"🔍 Episode Found: {title}", color=0x6d4aff)
-    embed.description = f"**Category:** {category}"
-
-    embed.add_field(name='🇮🇳 Indian Episode', value=in_ep, inline=True)
-    if alt_ep:
-        embed.add_field(name='🔢 Alt IN Number', value=alt_ep, inline=True)
-    embed.add_field(name='🇯🇵 Japanese Story #', value=jp_display, inline=True)
-    embed.add_field(name='📖 Story A', value=story_a[:200], inline=False)
-    if story_b:
-        embed.add_field(name='📖 Story B', value=story_b[:200], inline=False)
-
-    footer = f'Searched by: {search_type} | Matches: {len(results)}'
-    embed.set_footer(text=footer)
-
-    if len(results) > 1:
-        additional = [f"• {r.get('in_season_episode', '?')}: {r.get('story_a', '?')[:40]}" for r in results[1:5]]
-        embed.add_field(name=f'➕ More Matches ({len(results)-1})', value='\n'.join(additional), inline=False)
-
-    await interaction.response.send_message(embed=embed)
+def detect_section_from_heading(soup, table):
+    """Find section heading before a table."""
+    for prev in table.find_all_previous(['h1', 'h2', 'h3']):
+        heading = prev.get_text(strip=True).upper()
+        
+        if 'SEASON' in heading:
+            num = re.search(r'\d+', heading)
+            return f'season_{num.group(0)}' if num else 'unknown', False
+        elif 'SPECIAL' in heading:
+            return 'special_episodes', True
+        elif 'CLASSIC' in heading:
+            return 'classic_doraemon', False
+    
+    return 'unknown', False
 
 
-@bot.tree.command(name='jp', description='Lookup by Japanese Story Number')
-@app_commands.describe(jp_number='Japanese Story Number (e.g., 1020, 1020 S, or S16)')
-async def jp_cmd(interaction, jp_number: str):
-    parsed = parse_jp_query(jp_number)
-
-    if not parsed:
-        embed = Embed(
-            title="❌ Invalid Format",
-            description=f'Could not parse "{jp_number}".\n\n'
-                        '**Examples:**\n'
-                        '• `1020` — regular story\n'
-                        '• `1020 S` — story marked as special\n'
-                        '• `S16` — standalone special #16',
-            color=0xcc0000
-        )
-        await interaction.response.send_message(embed=embed)
-        return
-
-    results = search_jp(jp_number, EPISODES)
-
-    if not results:
-        embed = Embed(
-            title="❌ Not Found",
-            description=f'No episode found for JP Story #{jp_number}',
-            color=0xcc0000
-        )
-        await interaction.response.send_message(embed=embed)
-        return
-
-    first = results[0]
-
-    # Build a descriptive title showing what was searched
-    if parsed['wants_special_only']:
-        title_str = f"🇯🇵 JP Story #{parsed['number']} S (Special)"
-    elif parsed['is_standalone']:
-        title_str = f"🇯🇵 JP Standalone Special S{parsed['number']}"
-    else:
-        title_str = f"🇯🇵 JP Story #{parsed['number']}"
-
-    embed = Embed(title=title_str, color=0x6d4aff)
-    embed.add_field(name='🇮🇳 IN Episode', value=first.get('in_season_episode', 'N/A'), inline=True)
-    embed.add_field(name='Category', value=first.get('category', 'unknown').replace('_', ' ').title(), inline=True)
-    if first.get('alt_in_episode'):
-        embed.add_field(name='🔢 Alt IN', value=first.get('alt_in_episode'), inline=True)
-    embed.add_field(name='📖 Story A', value=first.get('story_a', 'Unknown')[:200], inline=False)
-    if first.get('story_b'):
-        embed.add_field(name='📖 Story B', value=first.get('story_b')[:200], inline=False)
-    embed.add_field(name='All JP Stories', value=first.get('jp_story_all', '-'), inline=False)
-    embed.set_footer(text=f'Matches: {len(results)}')
-
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name='list', description='List episodes with pagination')
-@app_commands.describe(page='Page number (1-999)', season='Filter by season (1-10) or "special" or "classic"')
-async def list_cmd(interaction, page: int = 1, season: str = None):
-    filtered = EPISODES
-    if season:
-        s = season.lower()
-        if s == 'special':
-            filtered = [e for e in EPISODES if e.get('category') == 'special_episodes']
-        elif s == 'classic':
-            filtered = [e for e in EPISODES if e.get('category') == 'classic_doraemon']
-        elif s.isdigit():
-            filtered = [e for e in EPISODES if e.get('category') == f'season_{s}']
-
-    PAGE_SIZE = 10
-    start = (page - 1) * PAGE_SIZE
-    end = start + PAGE_SIZE
-
-    if start >= len(filtered):
-        embed = Embed(title="❌ Page Not Found", description=f'Page {page} does not exist.', color=0xcc0000)
-        await interaction.response.send_message(embed=embed)
-        return
-
-    chunk = filtered[start:end]
-    season_display = season if season else 'All'
-    embed = Embed(title=f'Doraemon Episodes - Page {page} ({season_display})', color=0x6d4aff)
-    embed.description = f'Total: **{len(filtered)}** | Showing {start + 1}-{min(end, len(filtered))}'
-
-    for r in chunk:
-        in_ep = r.get('in_season_episode', 'N/A')
-        jp_st = r.get('jp_story_all', '-') or '-'
-        story_a = r.get('story_a', 'Unknown')[:40]
-        story_b = r.get('story_b', '')
-        title_display = story_a
-        if story_b:
-            title_display += f' / {story_b[:40]}'
-        embed.add_field(name=f'{in_ep} | JP: {jp_st}', value=title_display, inline=False)
-
-    total_pages = (len(filtered) // PAGE_SIZE) + 1
-    embed.set_footer(text=f'Page {page} of {total_pages}')
-    await interaction.response.send_message(embed=embed)
+def scrape_with_playwright():
+    """Scrape episodes from Doraemon website using Playwright."""
+    url = os.getenv('DORAEMON_SITE_URL', 'https://doraemon-hindi-1979.netlify.app')
+    print(f"🔍 Launching browser: {url}")
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(url, wait_until='networkidle', timeout=90000)
+        
+        import time
+        time.sleep(5)
+        
+        episodes = []
+        html_content = page.content()
+        soup = BeautifulSoup(html_content, 'html.parser')
+        tables = soup.find_all('table')
+        
+        for table_idx, table in enumerate(tables):
+            section, is_specials = detect_section_from_heading(soup, table)
+            print(f"\n📺 Table {table_idx+1}: {section}")
+            
+            rows = table.find_all('tr')[1:]  # Skip header row
+            
+            for row in rows:
+                cells = row.find_all(['td', 'th'])
+                if len(cells) < 3:
+                    continue
+                
+                # Extract JP story references
+                jp_raw = cells[0].get_text(strip=True)
+                jp_parsed = parse_jp_numbers(jp_raw)
+                
+                # Determine Indian episode numbers
+                if is_specials and len(cells) >= 4:
+                    in_ep = cells[1].get_text(strip=True).upper()
+                    alt_in_ep = cells[2].get_text(strip=True)
+                    title = cells[3].get_text(strip=True)
+                    
+                    if not alt_in_ep or alt_in_ep.strip() in ['———', '-', '', '—']:
+                        alt_in_ep = None
+                else:
+                    in_ep = cells[1].get_text(strip=True).upper()
+                    alt_in_ep = None
+                    title = cells[2].get_text(strip=True)
+                
+                # Split title into story parts
+                story_parts = [s.strip() for s in title.split('/') if s.strip()]
+                story_a = story_parts[0] if story_parts else title
+                story_b = story_parts[1] if len(story_parts) > 1 else None
+                
+                # Build searchable blob
+                search_terms = [story_a, story_b if story_b else '', in_ep, section]
+                search_terms.extend([jp['number'] for jp in jp_parsed])
+                search_blob = ' '.join(str(x) for x in search_terms)
+                
+                episode_entry = {
+                    # Core fields for display
+                    'in_season_episode': in_ep,
+                    'alt_in_episode': alt_in_ep,
+                    'title': title[:150],
+                    'story_a': story_a,
+                    'story_b': story_b,
+                    'category': section,
+                    
+                    # JP references (structured for search)
+                    'jp_parsed': jp_parsed,
+                    'jp_story_numbers': [jp['number'] for jp in jp_parsed],
+                    'jp_story_all': ' '.join(str(p) for p in jp_parsed),
+                    'jp_has_specials': any(jp.get('is_special') for jp in jp_parsed),
+                    'jp_has_standalone_specials': any(jp.get('is_standalone_special') for jp in jp_parsed),
+                    
+                    # Metadata
+                    'search_blob': search_blob,
+                    'has_jp_reference': bool(jp_parsed),
+                    'scraped_at': datetime.now().isoformat()
+                }
+                
+                episodes.append(episode_entry)
+                
+                # Print progress
+                jp_display = ', '.join(jp['number'] for jp in jp_parsed[:3])
+                alt_str = f" | Alt IN: {alt_in_ep}" if alt_in_ep else ""
+                print(f"  ✓ {in_ep} | JP: {jp_display}{alt_str} | {story_a[:35]}")
+        
+        browser.close()
+        return episodes
 
 
-@bot.tree.command(name='stats', description='Show database statistics')
-async def stats_cmd(interaction):
-    counts = {}
+def main():
+    """Main entry point for database building."""
+    print("🔨 Starting Doraemon Database Build...")
+    print("=" * 50)
+    
+    # Scrape episodes
+    episodes = scrape_with_playwright()
+    
+    # Statistics
+    print("\n" + "=" * 50)
+    print(f"✅ SCRAPE COMPLETE: {len(episodes)} episodes")
+    
+    categories = {}
     with_jp = 0
     jp_specials = 0
     jp_standalone = 0
-
-    for e in EPISODES:
-        cat = e.get('category', 'unknown')
-        counts[cat] = counts.get(cat, 0) + 1
-        if e.get('jp_story_numbers'):
+    
+    for ep in episodes:
+        cat = ep.get('category', 'unknown')
+        categories[cat] = categories.get(cat, 0) + 1
+        
+        if ep.get('jp_story_numbers'):
             with_jp += 1
-        if e.get('jp_has_specials'):
+        if ep.get('jp_has_specials'):
             jp_specials += 1
-        if e.get('jp_has_standalone_specials'):
+        if ep.get('jp_has_standalone_specials'):
             jp_standalone += 1
+    
+    print("\n📊 Category Distribution:")
+    for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
+        print(f"  {cat}: {count}")
+    
+    print(f"\n🔢 Episodes with JP refs: {with_jp}")
+    print(f"🔢 With JP Specials (S suffix): {jp_specials}")
+    print(f"🔢 With Standalone Specials (S##): {jp_standalone}")
+    
+    # Create database directory
+    os.makedirs('database', exist_ok=True)
+    
+    # Build search index
+    search_index = {
+        'items': episodes,
+        'metadata': {
+            'total_episodes': len(episodes),
+            'generated_at': datetime.utcnow().isoformat(),
+            'source': os.getenv('DORAEMON_SITE_URL', 'unknown'),
+            'episodes_with_jp_refs': with_jp,
+            'jp_specials_count': jp_specials,
+            'jp_standalone_count': jp_standalone
+        }
+    }
+    
+    # Save all database files
+    with open('database/search_index.json', 'w', encoding='utf-8') as f:
+        json.dump(search_index, f, indent=2, ensure_ascii=False)
+    
+    with open('database/episodes.json', 'w', encoding='utf-8') as f:
+        json.dump({'episodes': episodes, 'metadata': {
+            'total': len(episodes),
+            'generated_at': datetime.utcnow().isoformat()
+        }}, f, indent=2, ensure_ascii=False)
+    
+    with open('database/metadata.json', 'w', encoding='utf-8') as f:
+        json.dump({
+            'total_episodes': len(episodes),
+            'categories': list(categories.keys()),
+            'category_breakdown': categories,
+            'generated_at': datetime.utcnow().isoformat()
+        }, f, indent=2, ensure_ascii=False)
+    
+    print("\n💾 Saved to database/")
+    print("  • search_index.json (main)")
+    print("  • episodes.json (full data)")
+    print("  • metadata.json (summary)")
+    print("✅ Database build complete!")
+    
+    return 0
 
-    embed = Embed(title='Database Statistics', color=0x6d4aff)
-    embed.description = (
-        f'**Total Episodes:** {len(EPISODES)}\n'
-        f'**JP Indexed:** {with_jp}\n'
-        f'**JP Special Stories (S suffix):** {jp_specials}\n'
-        f'**JP Standalone Specials (S##):** {jp_standalone}\n\n'
-        f'**Breakdown:**'
-    )
 
-    for cat, cnt in sorted(counts.items(), key=lambda x: -x[1]):
-        embed.add_field(name=cat.replace('_', ' ').title(), value=f'**{cnt}**', inline=True)
-
-    embed.set_footer(text=f'Generated: {DB.get("metadata", {}).get("generated_at", "unknown")}')
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name='help', description='Show available commands')
-async def help_cmd(interaction):
-    embed = Embed(title='🤖 Doraemon Search Bot Help', color=0x6d4aff)
-    embed.description = '''
-**Available Commands:**
-
-• `/search <query>` - Search by JP#, IN#, SPE, CE, or title
-• `/jp <number>` - Lookup by Japanese Story Number
-• `/list [page] [season]` - Browse episodes with pagination
-• `/stats` - Show database statistics
-• `/help` - Show this message
-
-**JP Story Number Formats:**
-• `1313` - Regular story #1313
-• `1313 S` - Story #1313 marked as special
-• `S16` - Standalone special #16 (S01-S30)
-
-**Search Examples:**
-• `/search 150` - Find JP Story #150 (any story with #150)
-• `/search 1020 S` - Find JP Story #1020 that's marked as special
-• `/search S16` - Find JP Standalone Special #16
-• `/search s04e35` - Find IN Episode S04E35
-• `/search spe01` - Find Indian Special Episode 01
-• `/search ce1` - Find Classic Episode 1
-• `/search nobita` - Search by story title
-
-**JP Command Examples:**
-• `/jp 1020` - Look up story #1020
-• `/jp 1020 S` - Look up story #1020 (special version)
-• `/jp S16` - Look up standalone special #16
-'''
-    embed.set_footer(text='🇯🇵 ↔ 🇮🇳 Bidirectional Cross-Reference')
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.event
-async def on_ready():
-    print(f'✅ Logged in as {bot.user}')
-    synced = await bot.tree.sync()
-    print(f'✅ Synced {len(synced)} GLOBAL commands')
-    if bot.guilds:
-        print(f'Bot is in {len(bot.guilds)} guild(s)')
+if __name__ == '__main__':
+    try:
+        exit(main())
+    except Exception as e:
+        print(f"\n❌ Database build failed: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
