@@ -6,22 +6,37 @@ For GitHub Actions CI/CD only - does NOT run Discord bot.
 import json
 import os
 import re
+import unicodedata
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 
+def normalize_unicode(text):
+    """Normalize unicode characters (full-width → regular, superscript → regular)."""
+    normalized = ''.join(
+        c if ord(c) < 128 else unicodedata.normalize('NFKC', c)[0] 
+        for c in text
+    )
+    # Convert common S indicators to standard form
+    normalized = normalized.replace('ˢ', 'S').replace('ˢ', 'S')
+    normalized = re.sub(r'\[S\]|\(S\)|\*|†|‡|⁽ˢ⁾|⁽ˢ⁾', '[S]', normalized)
+    normalized = re.sub(r'(\d+)\s*S\s*(?!\d)', r'\1 S', normalized)  # "1020S" → "1020 S"
+    return normalized
 
-def parse_jp_numbers(jp_raw):
+def parse_jp_numbers(jp_raw, jp_cell_element=None):
     """
-    Parse JP story references into structured format.
+    Parse JP story references into structured format with multiple detection methods.
     
     Returns list of dicts:
     [
       {'number': '1020', 'is_special': False, 'is_standalone_special': False},
-      {'number': '16', 'is_special': False, 'is_standalone_special': True},  # S16
+      {'number': '1020', 'is_special': True, 'is_standalone_special': False},   # Has S suffix
+      {'number': '16', 'is_special': False, 'is_standalone_special': True},     # S16
     ]
     """
-    cleaned = re.sub(r'[^\w\s/]', '', jp_raw)
+    # Normalize unicode first
+    normalized = normalize_unicode(jp_raw)
+    cleaned = re.sub(r'[^\w\s/]', '', normalized)
     tokens = re.split(r'[\s/\-,]+', cleaned)
     parsed = []
     
@@ -29,24 +44,51 @@ def parse_jp_numbers(jp_raw):
         if not token:
             continue
         
-        # Standalone special: S16, s16
-        if re.match(r'^s\d+$', token, re.I):
+        # Method 1: Standalone special - S16, s16, s-16
+        stand_match = re.match(r'^s[\-\.]?(\d+)$', token, re.I)
+        if stand_match:
             parsed.append({
-                'number': re.search(r'\d+', token).group(0),
+                'number': stand_match.group(1),
                 'is_special': False,
                 'is_standalone_special': True
             })
-        # Regular number, possibly with S suffix: 1020, 1020S, 1020 s
-        elif re.match(r'^\d+\s*s*$', token, re.I):
-            has_s_suffix = bool(re.search(r's\s*$', token, re.I))
+            continue
+        
+        # Method 2: Regular number with S suffix - 1020S, 1020 s, 1020.s
+        regular_match = re.match(r'^(\d+)(?:[\s\.]*[sS]|[S]|$)$', token)
+        if regular_match:
+            has_s_suffix = bool(re.search(r'[sS]$', token))
             parsed.append({
-                'number': re.search(r'\d+', token).group(0),
+                'number': regular_match.group(1),
                 'is_special': has_s_suffix,
                 'is_standalone_special': False
             })
+            continue
+        
+        # Method 3: Plain number (no S marker)
+        plain_match = re.match(r'^(\d+)$', token)
+        if plain_match:
+            parsed.append({
+                'number': plain_match.group(1),
+                'is_special': False,
+                'is_standalone_special': False
+            })
+    
+    # Method 4: If cell element provided, check for HTML markers indicating special status
+    if jp_cell_element:
+        special_indicators = (
+            jp_cell_element.find(class_='special') or
+            jp_cell_element.find(class_='starred') or
+            jp_cell_element.find('sup') or
+            jp_cell_element.find(string=re.compile(r'\[S\]|\(S\)|\*'))
+        )
+        if special_indicators:
+            # Mark all non-standalone numbers in this cell as special
+            for p in parsed:
+                if not p.get('is_standalone_special'):
+                    p['is_special'] = True
     
     return parsed
-
 
 def detect_section_from_heading(soup, table):
     """Find section heading before a table."""
@@ -62,7 +104,6 @@ def detect_section_from_heading(soup, table):
             return 'classic_doraemon', False
     
     return 'unknown', False
-
 
 def scrape_with_playwright():
     """Scrape episodes from Doraemon website using Playwright."""
@@ -93,9 +134,10 @@ def scrape_with_playwright():
                 if len(cells) < 3:
                     continue
                 
-                # Extract JP story references
-                jp_raw = cells[0].get_text(strip=True)
-                jp_parsed = parse_jp_numbers(jp_raw)
+                # Extract JP story references from cell element
+                jp_cell = cells[0]
+                jp_raw = jp_cell.get_text(strip=True)
+                jp_parsed = parse_jp_numbers(jp_raw, jp_cell)
                 
                 # Determine Indian episode numbers
                 if is_specials and len(cells) >= 4:
@@ -144,14 +186,17 @@ def scrape_with_playwright():
                 
                 episodes.append(episode_entry)
                 
-                # Print progress
-                jp_display = ', '.join(jp['number'] for jp in jp_parsed[:3])
+                # Print progress with debug info
+                jp_display = ', '.join(f"{jp['number']}" + (" S" if jp.get('is_special') else "") for jp in jp_parsed[:3])
                 alt_str = f" | Alt IN: {alt_in_ep}" if alt_in_ep else ""
-                print(f"  ✓ {in_ep} | JP: {jp_display}{alt_str} | {story_a[:35]}")
+                
+                if any(jp.get('is_special') for jp in jp_parsed):
+                    print(f"  ✓ {in_ep} | JP: {jp_display}(Special){alt_str} | {story_a[:35]}")
+                else:
+                    print(f"  ✓ {in_ep} | JP: {jp_display}{alt_str} | {story_a[:35]}")
         
         browser.close()
         return episodes
-
 
 def main():
     """Main entry point for database building."""
@@ -230,7 +275,6 @@ def main():
     print("✅ Database build complete!")
     
     return 0
-
 
 if __name__ == '__main__':
     try:
