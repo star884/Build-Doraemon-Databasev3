@@ -1,20 +1,9 @@
 {
-  "total_episodes": 656,
-  "category_breakdown": {
-    "season_1": 52,
-    "season_2": 51,
-    "season_3": 52,
-    "season_4": 52,
-    "season_5": 52,
-    "season_6": 52,
-    "season_7": 52,
-    "season_8": 52,
-    "season_9": 42,
-    "season_10": 50,
-    "special_episodes": 72,
-    "classic_doraemon": 77
-  },
-  "jp_special_stories": 78,
-  "jp_standalone_specials": 22,
-  "generated_at": "2026-07-26T04:06:04.680133"
+  "total_episodes": 0,
+  "categories": {},
+  "seasons": {},
+  "jp_story_references": 0,
+  "episodes_with_jp_refs": 0,
+  "fetched_at": "2026-07-26T17:52:51.448381",
+  "source_url": "https://doraemon-hindi-1979.netlify.app"
 }
