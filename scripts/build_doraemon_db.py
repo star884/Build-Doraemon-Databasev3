@@ -1,12 +1,4 @@
-import discord
-import json
-import os
-import re
-from discord import app_commands, Embed
-from discord.ext import commands
-from dotenv import load_dotenv
 
-load_dotenv()
 
 try:
     with open('database/search_index.json') as f:
