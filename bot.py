@@ -1451,7 +1451,7 @@ async def jp_cmd(interaction: discord.Interaction, jp_number: str):
 
 
 # ============================================
-# LIST COMMAND (FIXED WITH ALPHABETICAL SORTING FOR CHARACTERS)
+# LIST COMMAND
 # ============================================
 
 @bot.tree.command(name='list', description='List episodes or characters with pagination')
@@ -1461,21 +1461,29 @@ async def jp_cmd(interaction: discord.Interaction, jp_number: str):
 )
 @rate_limited('list')
 async def list_cmd(interaction: discord.Interaction, page: int = 1, filter_val: str = None):
+    # Check if ANY data exists (episodes OR characters)
     if not dm.episodes and not dm.char_data:
-        embed = Embed(title='Database Empty', description='No episodes loaded.',
-                      color=CFG.color_error)
+        embed = Embed(title='Database Empty', description='No data loaded. Use `/source_change` to switch sources.', color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
     
     csv_mode = dm.is_csv_source()
     char_mode = dm.is_char_source()
     
-    # Get the appropriate data source
+    # Determine which dataset to use
     if char_mode:
+        # Use character data
+        if not dm.char_data:
+            embed = Embed(title='No Characters Loaded', description='Character database is empty. Use `/source_change 3` or `/source_change 4`.', color=CFG.color_error)
+            await interaction.response.send_message(embed=embed)
+            return
         filtered = dm.char_data[:]
-        # Sort alphabetically by Character Name for character listings
-        filtered.sort(key=lambda x: x.get('Character Name', '').lower())
     else:
+        # Use episode/manga data
+        if not dm.episodes:
+            embed = Embed(title='No Episodes Loaded', description='Episode database is empty. Use `/source_change 1` or `/source_change 2`.', color=CFG.color_error)
+            await interaction.response.send_message(embed=embed)
+            return
         filtered = dm.episodes[:]
     
     # Apply filter if provided
@@ -1503,8 +1511,7 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, filter_val: 
     if page > total_pages:
         embed = Embed(
             title='Page Not Found',
-            description=f'Page {page} does not exist. Valid pages: 1-{total_pages}\n'
-                        f'**Source:** {dm.current_source["name"]}',
+            description=f'Page {page} does not exist. Valid pages: 1-{total_pages}\n**Source:** {dm.current_source["name"]}',
             color=CFG.color_error
         )
         await interaction.response.send_message(embed=embed)
@@ -1516,13 +1523,17 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, filter_val: 
     chunk = filtered[start:end]
     filter_display = filter_val if filter_val else 'All'
     
+    # Create appropriate title
     if char_mode:
         embed = Embed(title=f'Characters - Page {page} ({filter_display})', color=CFG.color_primary)
+    elif csv_mode:
+        embed = Embed(title=f'Manga Stories - Page {page} ({filter_display})', color=CFG.color_primary)
     else:
         embed = Embed(title=f'Doraemon Episodes - Page {page} ({filter_display})', color=CFG.color_primary)
     
     embed.description = f'Total: **{len(filtered)}** | Showing {start + 1}-{end}'
     
+    # Add fields based on mode
     for r in chunk:
         if char_mode:
             name = r.get('Character Name', '?')
@@ -1559,6 +1570,7 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, filter_val: 
     
     embed.set_footer(text=f'Page {page} of {total_pages} | Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
+
 
 
 # ============================================
