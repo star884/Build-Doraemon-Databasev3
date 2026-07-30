@@ -538,8 +538,8 @@ class DatabaseManager:
         
         return stories
     
-    def _parse_char_csv_rows(self, reader) -> List[dict]:
-        """Parse character CSV rows using the expected header."""
+        def _parse_char_csv_rows(self, reader) -> List[dict]:
+        """Parse character CSV rows using the expected header, with smart source merging."""
         characters = []
         header = next(reader, None)
         
@@ -549,6 +549,7 @@ class DatabaseManager:
         else:
             header = CHAR_CSV_FIELD_NAMES
         
+        raw_entries = []
         for row in reader:
             if not row or all(c.strip() == '' for c in row):
                 continue
@@ -558,7 +559,81 @@ class DatabaseManager:
             for i, col_name in enumerate(header):
                 entry[col_name] = row[i].strip() if i < len(row) else ''
             entry['_raw'] = row
-            characters.append(entry)
+            raw_entries.append(entry)
+        
+        # ============================================
+        # SMART MERGE DEDUPLICATION (CHARACTER NAME ONLY)
+        # ============================================
+        #
+        # REQUIRED: Character Name must match (case-insensitive, trimmed)
+        # OPTIONAL: Description matching confirms it's the same character
+        # RESULT: Source References are merged, duplicates ignored
+        #
+        
+        seen_keys: dict = {}  # key (name) -> index in characters list
+        merged_count = 0
+        skipped_no_name = 0
+        desc_conflicts = 0
+        
+        for entry in raw_entries:
+            name = entry.get('Character Name', '').strip()
+            desc = entry.get('Description', '').strip()
+            refs = entry.get('Source References', '').strip()
+            
+            if not name:
+                skipped_no_name += 1
+                continue
+            
+            # REQUIRED: Character Name (lowercase, trimmed)
+            key = name.lower()
+            
+            if key in seen_keys:
+                # Same character name found! Merge Source References.
+                existing_idx = seen_keys[key]
+                existing = characters[existing_idx]
+                
+                # Check if description also matches (optional confirmation)
+                existing_desc = existing.get('Description', '').strip().lower()
+                
+                if desc.lower() != existing_desc:
+                    desc_conflicts += 1
+                    logger.info(f'Name match but description differs for "{name}" - keeping original description')
+                
+                # Existing refs set for comparison
+                existing_refs_str = existing.get('Source References', '').strip()
+                existing_refs_set = {r.strip().lower() for r in re.split(r'[;,\n]', existing_refs_str) if r.strip()}
+                
+                # Parse new refs
+                new_refs_list = [r.strip() for r in re.split(r'[;,\n]', refs) if r.strip()]
+                
+                # Only add refs that aren't already present
+                refs_to_add = []
+                for ref in new_refs_list:
+                    if ref.lower() not in existing_refs_set:
+                        refs_to_add.append(ref)
+                        existing_refs_set.add(ref.lower())
+                
+                if refs_to_add:
+                    if existing_refs_str:
+                        merged_refs = f"{existing_refs_str}; {'; '.join(refs_to_add)}"
+                    else:
+                        merged_refs = '; '.join(refs_to_add)
+                    
+                    existing['Source References'] = merged_refs
+                    merged_count += 1
+                    logger.debug(f'Merged {len(refs_to_add)} new source(s) for "{name}"')
+            else:
+                # New unique character name, add it
+                seen_keys[key] = len(characters)
+                characters.append(entry)
+        
+        logger.info(
+            f'Smart Merge (by Character Name) complete. '
+            f'Kept {len(characters)} unique entries. '
+            f'Merged sources for {merged_count} duplicates. '
+            f'Description conflicts: {desc_conflicts}. '
+            f'Skipped {skipped_no_name} empty names.'
+        )
         
         return characters
     
