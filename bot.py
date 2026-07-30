@@ -1686,9 +1686,9 @@ async def stats_cmd(interaction: discord.Interaction):
         for mag, cnt in sorted(magazines.items(), key=lambda x: -x[1]):
             embed.add_field(name=mag, value=f'**{cnt}**', inline=True)
         
-        has_1979 = sum(1 for e in dm.episodes if e.get('1979 anime', '').strip())
+               has_1979 = sum(1 for e in dm.episodes if e.get('1979 anime', '').strip())
         has_2005 = sum(1 for e in dm.episodes if e.get('2005 anime', '').strip())
-                has_movie = sum(1 for e in dm.episodes if e.get('Movie', '').strip())
+        has_movie = sum(1 for e in dm.episodes if e.get('Movie', '').strip()) 
 
         embed.add_field(name='Has 1979 Anime', value=f'**{has_1979}**', inline=True)
         embed.add_field(name='Has 2005 Anime', value=f'**{has_2005}**', inline=True)
