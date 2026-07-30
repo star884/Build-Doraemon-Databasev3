@@ -95,6 +95,10 @@ class BotConfig:
         return os.path.join(self.home_dir, "Doraemon-CSV-DB", "database") + "/"
     
     @property
+    def char_csv_local_path(self) -> str:  # NEW: Character CSV local path
+        return os.path.join(self.home_dir, CHAR_CSV_REPO_NAME) + "/"
+    
+    @property
     def csv_raw_base_url(self) -> str:
         return 'https://raw.githubusercontent.com/star884/Doraemon-CSV-DB/main/database/'
 
@@ -514,11 +518,19 @@ class DatabaseManager:
             },
             {
                 'id': 3,
-                'name': 'Characters CSV (GitHub: Database-dorav2)',
+                'name': 'Characters CSV (Remote - GitHub)',
                 'url': CHAR_CSV_RAW_URL,
                 'type': 'csv_char',
                 'files': [CHAR_CSV_FILENAME],
                 'fetch_method': 'github_raw'
+            },
+            {
+                'id': 4,  # NEW: Local character database option
+                'name': 'Characters CSV (Local Clone)',
+                'url': CFG.char_csv_local_path,
+                'type': 'csv_char',
+                'files': [CHAR_CSV_FILENAME],
+                'fetch_method': 'local_file'
             }
         ]
         self._lock = asyncio.Lock()
@@ -863,12 +875,19 @@ class DatabaseManager:
         return False
     
     async def load_char_database(self, source_config: Dict[str, Any]) -> bool:
-        """Load character database (local or remote)."""
+        """Load character database (local or remote) - ENHANCED WITH FALLBACK."""
         fetch_method = source_config.get('fetch_method', 'github_raw')
         source_url = source_config['url']
         
         if fetch_method == 'local_file':
-            success = self.load_char_csv_local(source_url)
+            # Extract filename from config or use default
+            filename = source_config.get('files', [CHAR_CSV_FILENAME])[0]
+            filepath = os.path.join(source_url.rstrip('/'), filename)
+            success = self.load_char_csv_local(filepath)
+            
+            if not success:
+                logger.info('Local load failed, attempting remote fallback...')
+                success = await self.load_char_csv_remote(CHAR_CSV_RAW_URL)
         else:
             success = await self.load_char_csv_remote(source_url)
         
@@ -915,7 +934,8 @@ class DatabaseManager:
                     '- No internet connection\n'
                     '- Repository unavailable\n\n'
                     f'Current source: **{self.current_source["name"]}**\n\n'
-                    '**Fix:** Try `/source_change 1` (JSON) or `/source_change 2` (Manga CSV)'
+                    '**Fix:** Try `/source_change 1` (JSON), `/source_change 2` (Manga CSV), '
+                    '`/source_change 3` (Remote Chars), or `/source_change 4` (Local Chars)'
                 ),
                 color=CFG.color_error
             )
@@ -1097,8 +1117,45 @@ async def source_all_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+@bot.tree.command(name='source_status', description='Shows detailed status of all database sources')
+@rate_limited('source_status')
+async def source_status_cmd(interaction: discord.Interaction):
+    """Enhanced source status showing availability and load times."""
+    embed = Embed(title='Database Sources Status', color=CFG.color_primary)
+    
+    for src in dm.available_sources:
+        status_icon = '🟢' if src['id'] == dm.current_source['id'] else '⚪'
+        
+        desc = f'{status_icon} **{src["id"]}) {src["name"]}**\n'
+        desc += f'> Type: `{src["type"]}` | Fetch: `{src.get("fetch_method", "default")}`\n'
+        
+        # Show load status
+        if src['type'] == 'json' and dm.episodes:
+            desc += f'> **Records:** {len(dm.episodes)} ✓ Loaded\n'
+        elif src['type'] == 'csv' and dm.csv_data_loaded:
+            desc += f'> **Records:** {len(dm.csv_stories)} ✓ Loaded\n'
+        elif src['type'] == 'csv_char' and dm.char_data_loaded:
+            if src['id'] == 3:
+                desc += f'> **Records:** {len(dm.char_data)} ✓ Remote Loaded\n'
+            elif src['id'] == 4:
+                desc += f'> **Records:** {len(dm.char_data)} ✓ Local Loaded\n'
+        else:
+            desc += '> ⏳ Not loaded (switch to enable)\n'
+        
+        if src['id'] == dm.current_source['id']:
+            desc += '> **← Currently Active**\n'
+        
+        embed.add_field(name='\u200b', value=desc, inline=False)
+    
+    safe_add_field(embed, name='Quick Reference',
+                   value='`/source_change <id>` to switch\n`/source_status` refreshes status',
+                   inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+
 @bot.tree.command(name='source_change', description='Changes the active database source')
-@app_commands.describe(source_id='Source number to switch to (1=JSON, 2=CSV, 3=Characters)')
+@app_commands.describe(source_id='Source number to switch to (1=JSON, 2=CSV, 3=Remote Chars, 4=Local Chars)')
 @rate_limited('source_change', limit=3)
 async def source_change_cmd(interaction: discord.Interaction, source_id: int):
     source = next((s for s in dm.available_sources if s['id'] == source_id), None)
@@ -1139,8 +1196,8 @@ async def source_change_cmd(interaction: discord.Interaction, source_id: int):
                     description=(
                         'Could not load character data.\n\n'
                         '**Troubleshooting:**\n'
-                        '- Check internet connection\n'
-                        '- Verify repository is accessible\n'
+                        '- For remote (id 3): Check internet connection\n'
+                        '- For local (id 4): Clone repo - `git clone https://github.com/star884/Database-dorav2.git ~`\n'
                         '- Try `/source_change 1` (JSON) or `/source_change 2` (Manga CSV)'
                     ),
                     color=CFG.color_warning
@@ -1167,7 +1224,7 @@ async def source_change_cmd(interaction: discord.Interaction, source_id: int):
         embed.add_field(name='Previous Source', value=old_source['name'], inline=False)
         embed.add_field(name='New Source', value=source['name'], inline=False)
         embed.add_field(name='Records Loaded', value=str(record_count), inline=True)
-        embed.set_footer(text='Use /source to view current')
+        embed.set_footer(text='Use /source_status to view status')
         await interaction.response.send_message(embed=embed)
     
     except Exception as e:
@@ -1631,12 +1688,12 @@ async def stats_cmd(interaction: discord.Interaction):
         
         has_1979 = sum(1 for e in dm.episodes if e.get('1979 anime', '').strip())
         has_2005 = sum(1 for e in dm.episodes if e.get('2005 anime', '').strip())
-        has_movie = sum(1 for e in dm.episodes if e.get('Movie', '').strip())
-        
+                has_movie = sum(1 for e in dm.episodes if e.get('Movie', '').strip())
+
         embed.add_field(name='Has 1979 Anime', value=f'**{has_1979}**', inline=True)
         embed.add_field(name='Has 2005 Anime', value=f'**{has_2005}**', inline=True)
         embed.add_field(name='Has Movie', value=f'**{has_movie}**', inline=True)
-        
+
         if dm.csv_data_loaded:
             embed.add_field(name='CSV Rows', value=str(len(dm.csv_stories)), inline=True)
     else:
@@ -1644,7 +1701,7 @@ async def stats_cmd(interaction: discord.Interaction):
         with_jp = 0
         jp_specials = 0
         jp_standalone = 0
-        
+
         for e in dm.episodes:
             cat = e.get('category', 'unknown')
             counts[cat] = counts.get(cat, 0) + 1
@@ -1654,7 +1711,7 @@ async def stats_cmd(interaction: discord.Interaction):
                 jp_specials += 1
             if e.get('jp_has_standalone_specials'):
                 jp_standalone += 1
-        
+
         embed.description = (
             f'**Total Episodes:** {len(dm.episodes)}\n'
             f'**JP Indexed:** {with_jp}\n'
@@ -1666,7 +1723,7 @@ async def stats_cmd(interaction: discord.Interaction):
         )
         for cat, cnt in sorted(counts.items(), key=lambda x: -x[1]):
             embed.add_field(name=cat.replace('_', ' ').title(), value=f'**{cnt}**', inline=True)
-    
+
     embed.set_footer(text=f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")} | '
                            f'Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
@@ -1679,7 +1736,7 @@ async def stats_cmd(interaction: discord.Interaction):
 @bot.tree.command(name='help', description='Show available commands')
 async def help_cmd(interaction: discord.Interaction):
     embed = Embed(title='Doraemon Search Bot Help', color=CFG.color_primary)
-    
+
     if dm.is_char_source():
         embed.description = (
             '**Available Commands (Character Mode):**\n\n'
@@ -1693,7 +1750,8 @@ async def help_cmd(interaction: discord.Interaction):
             '**Source Commands**\n'
             '- `/source` - Shows current source\n'
             '- `/source_all` - Lists all sources\n'
-            '- `/source_change <id>` - Switch source (1=JSON, 2=Manga CSV, 3=Characters)\n\n'
+            '- `/source_status` - Detailed status of all sources\n'
+            '- `/source_change <id>` - Switch source (1=JSON, 2=Manga CSV, 3=Remote Chars, 4=Local Chars)\n\n'
             '**Info**\n'
             '- `/help` - Show this message\n\n'
             f'**Current Source:** {dm.current_source["name"]}\n'
@@ -1709,7 +1767,8 @@ async def help_cmd(interaction: discord.Interaction):
             '**Source Commands**\n'
             '- `/source` - Shows current source\n'
             '- `/source_all` - Lists all sources\n'
-            '- `/source_change <id>` - Switch source (1=JSON, 2=Manga CSV, 3=Characters)\n\n'
+            '- `/source_status` - Detailed status of all sources\n'
+            '- `/source_change <id>` - Switch source (1=JSON, 2=Manga CSV, 3=Remote Chars, 4=Local Chars)\n\n'
             '**CSV-Only Commands**\n'
             '- `/search_jp_title <keyword>` - Search by Japanese title\n'
             '- `/search_magazine <code>` - Search by magazine code\n'
@@ -1732,13 +1791,14 @@ async def help_cmd(interaction: discord.Interaction):
             '**Source Commands**\n'
             '- `/source` - Shows current source\n'
             '- `/source_all` - Lists all sources\n'
-            '- `/source_change <id>` - Switch source (1=JSON, 2=Manga CSV, 3=Characters)\n\n'
+            '- `/source_status` - Detailed status of all sources\n'
+            '- `/source_change <id>` - Switch source (1=JSON, 2=Manga CSV, 3=Remote Chars, 4=Local Chars)\n\n'
             '**Info**\n'
             '- `/help` - Show this message\n\n'
             f'**Current Source:** {dm.current_source["name"]}\n'
             f'**Total Records:** {len(dm.episodes)}'
         )
-    
+
     embed.set_footer(text='Doraemon Search Bot')
     await interaction.response.send_message(embed=embed)
 
@@ -1751,23 +1811,22 @@ async def help_cmd(interaction: discord.Interaction):
 @app_commands.describe(query='Japanese title or keyword')
 @rate_limited('search_jp_title')
 async def search_jp_title_cmd(interaction: discord.Interaction, query: str):
-    is_available, error_embed = dm.check_csv
-    _source()
+    is_available, error_embed = dm.check_csv_source()  # FIXED: was check_csv
     if not is_available:
         await interaction.response.send_message(embed=error_embed)
         return
-    
+
     q = sanitize_query(query).lower()
     results = [s for s in dm.csv_stories
                if q in s.get('Japanese title', '').lower() or q in s.get('English title', '').lower()]
-    
+
     if not results:
         embed = Embed(title='No Results Found',
                       description=f'No stories found for "**{query}**"',
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
-    
+
     first = results[0]
     embed = Embed(title=f'JP Title Match: {truncate(first.get("English title", "Unknown"), 70)}',
                   color=CFG.color_primary)
@@ -1776,11 +1835,11 @@ async def search_jp_title_cmd(interaction: discord.Interaction, query: str):
     embed.add_field(name='2005 Episode', value=first.get('2005 anime', 'N/A'), inline=True)
     embed.add_field(name='Magazine', value=first.get('Magazine code', 'N/A'), inline=True)
     embed.add_field(name='Publication Date', value=first.get('Publication Date', 'N/A'), inline=True)
-    
+
     if len(results) > 1:
         additional = '\n'.join(f'- {truncate(r.get("English title", "?"), 40)}' for r in results[1:6])
         safe_add_field(embed, name=f'More Matches ({len(results) - 1})', value=additional, inline=False)
-    
+
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name='search_magazine', description='Search by magazine code (CSV only)')
@@ -1791,30 +1850,30 @@ async def search_magazine_cmd(interaction: discord.Interaction, code: str):
     if not is_available:
         await interaction.response.send_message(embed=error_embed)
         return
-    
+
     code_upper = sanitize_query(code).upper()
     results = [s for s in dm.csv_stories if s.get('Magazine code', '').upper() == code_upper]
-    
+
     if not results:
         embed = Embed(title='No Results Found',
                       description=f'No stories found for magazine code "**{code_upper}**"',
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
-    
+
     embed = Embed(title=f'Magazine: {code_upper}', color=CFG.color_primary)
     embed.description = f'Found **{len(results)}** stories'
-    
+
     for story in results[:10]:
         title = story.get('English title', '') or story.get('Japanese title', 'Unknown')
         date = story.get('Publication Date', '?')
         safe_add_field(embed, name=f'{date} - {truncate(title, 50)}', value=ZERO_WIDTH_SPACE, inline=False)
-    
+
     if len(results) > 10:
         embed.set_footer(text=f'Showing 10 of {len(results)} results | Source: {dm.current_source["name"]}')
     else:
         embed.set_footer(text=f'Source: {dm.current_source["name"]}')
-    
+
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name='search_1979', description='Search by 1979 anime episode (CSV only)')
@@ -1825,7 +1884,7 @@ async def search_1979_cmd(interaction: discord.Interaction, episode: str):
     if not is_available:
         await interaction.response.send_message(embed=error_embed)
         return
-    
+
     q = sanitize_query(episode).lower().strip()
     results = []
     for s in dm.csv_stories:
@@ -1833,28 +1892,28 @@ async def search_1979_cmd(interaction: discord.Interaction, episode: str):
         val_extra = s.get('1979 anime extra', '').lower()
         if q in val or q in val_extra:
             results.append(s)
-    
+
     if not results:
         embed = Embed(title='No Results Found',
                       description=f'No stories found for 1979 anime episode "**{episode}**"',
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
-    
+
     embed = Embed(title=f'1979 Anime: {episode}', color=CFG.color_primary)
     embed.description = f'Found **{len(results)}** story/stories'
-    
+
     for story in results[:10]:
         title = story.get('English title', '') or story.get('Japanese title', '?')
         jp = story.get('Japanese title', '')
         desc = f'- {truncate(title, 50)}' + (f' ({truncate(jp, 30)})' if jp else '')
         safe_add_field(embed, name=truncate(desc, CFG.embed_field_name_max), value=ZERO_WIDTH_SPACE, inline=False)
-    
+
     if len(results) > 10:
         embed.set_footer(text=f'Showing 10 of {len(results)} results | Source: {dm.current_source["name"]}')
     else:
         embed.set_footer(text=f'Source: {dm.current_source["name"]}')
-    
+
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name='search_2005', description='Search by 2005 anime episode (CSV only)')
@@ -1865,7 +1924,7 @@ async def search_2005_cmd(interaction: discord.Interaction, episode: str):
     if not is_available:
         await interaction.response.send_message(embed=error_embed)
         return
-    
+
     q = sanitize_query(episode).lower().strip()
     results = []
     for s in dm.csv_stories:
@@ -1874,28 +1933,28 @@ async def search_2005_cmd(interaction: discord.Interaction, episode: str):
         val_extra2 = s.get('2005 anime extra 2', '').lower()
         if q in val or q in val_extra or q in val_extra2:
             results.append(s)
-    
+
     if not results:
         embed = Embed(title='No Results Found',
                       description=f'No stories found for 2005 anime episode "**{episode}**"',
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
-    
+
     embed = Embed(title=f'2005 Anime: {episode}', color=CFG.color_primary)
     embed.description = f'Found **{len(results)}** story/stories'
-    
+
     for story in results[:10]:
         title = story.get('English title', '') or story.get('Japanese title', '?')
         jp = story.get('Japanese title', '')
         desc = f'- {truncate(title, 50)}' + (f' ({truncate(jp, 30)})' if jp else '')
         safe_add_field(embed, name=truncate(desc, CFG.embed_field_name_max), value=ZERO_WIDTH_SPACE, inline=False)
-    
+
     if len(results) > 10:
         embed.set_footer(text=f'Showing 10 of {len(results)} results | Source: {dm.current_source["name"]}')
     else:
         embed.set_footer(text=f'Source: {dm.current_source["name"]}')
-    
+
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name='search_volume', description='Search by volume number across all compilation types (CSV only)')
@@ -1920,7 +1979,7 @@ async def search_volume_cmd(
     if not is_available:
         await interaction.response.send_message(embed=error_embed)
         return
-    
+
     q = sanitize_query(volume_number).strip()
     if not q:
         embed = Embed(title='Empty Query',
@@ -1928,9 +1987,9 @@ async def search_volume_cmd(
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
-    
+
     results = []
-    
+
     if volume_type == 'all':
         for story in dm.csv_stories:
             for col_name in VOLUME_COLUMNS.values():
@@ -1948,7 +2007,7 @@ async def search_volume_cmd(
                 story_copy = dict(story)
                 story_copy['_matched_column'] = col_name
                 results.append(story_copy)
-    
+
     if not results:
         embed = Embed(
             title='No Results Found',
@@ -1967,7 +2026,7 @@ async def search_volume_cmd(
         embed.set_footer(text=f'Source: {dm.current_source["name"]}')
         await interaction.response.send_message(embed=embed)
         return
-    
+
     type_display = {
         'tankobon':  'Tankōbon',
         'complete':  'Complete Collection',
@@ -1975,18 +2034,18 @@ async def search_volume_cmd(
         'bilingual': 'Bilingual Print',
         'all':       'All Types',
     }.get(volume_type, volume_type.title())
-    
+
     embed = Embed(
         title=f'Volume Search: "{volume_number}" ({type_display})',
         color=CFG.color_primary
     )
     embed.description = f'Found **{len(results)}** story/stories'
-    
+
     for story in results[:10]:
         title = story.get('English title', '') or story.get('Japanese title', 'Unknown')
         jp_title = story.get('Japanese title', '')
         matched_col = story.get('_matched_column', '?')
-        
+
         vol_parts = []
         for col_label, col_key in [
             ('Tankōbon', 'Tankōbon'),
@@ -1998,16 +2057,16 @@ async def search_volume_cmd(
             if v:
                 highlight = '**' if col_key == matched_col else ''
                 vol_parts.append(f'{highlight}{col_label}: {v}{highlight}')
-        
+
         field_name = truncate(title, CFG.embed_field_name_max)
         field_value = (f'({truncate(jp_title, 30)})\n' if jp_title else '') + ' | '.join(vol_parts)
         safe_add_field(embed, name=field_name, value=field_value, inline=False)
-    
+
     if len(results) > 10:
         embed.set_footer(text=f'Showing 10 of {len(results)} results | Source: {dm.current_source["name"]}')
     else:
         embed.set_footer(text=f'Source: {dm.current_source["name"]}')
-    
+
     await interaction.response.send_message(embed=embed)
 
 # ============================================
@@ -2022,7 +2081,7 @@ async def character_cmd(interaction: discord.Interaction, name: str):
     if not is_available:
         await interaction.response.send_message(embed=error_embed)
         return
-    
+
     q = sanitize_query(name)
     if not q:
         embed = Embed(title='Empty Query',
@@ -2030,12 +2089,12 @@ async def character_cmd(interaction: discord.Interaction, name: str):
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
-    
+
     q_lower = q.lower()
-    
+
     # Use the tiered search_characters function with word-boundary matching
     results = search_characters(q_lower, dm.char_data, use_word_boundary=True)
-    
+
     if not results:
         embed = Embed(
             title='No Results Found',
@@ -2048,28 +2107,28 @@ async def character_cmd(interaction: discord.Interaction, name: str):
         )
         await interaction.response.send_message(embed=embed)
         return
-    
+
     first = results[0]
     char_name = first.get('Character Name', 'Unknown')
     alt_name = first.get('Alternative Name', '')
     category = first.get('Category', 'Unknown')
     description = first.get('Description', '')
     references = first.get('Source References', '')
-    
+
     embed = Embed(title=f'Character: {truncate(char_name, 70)}', color=CFG.color_primary)
     embed.add_field(name='Alternative Name', value=alt_name or 'N/A', inline=True)
     embed.add_field(name='Category', value=category, inline=True)
     safe_add_field(embed, name='Description', value=truncate(description, CFG.embed_field_value_max), inline=False)
     if references:
         safe_add_field(embed, name='Source References', value=truncate(references, CFG.embed_field_value_max), inline=False)
-    
+
     if len(results) > 1:
         additional = '\n'.join(
             f'- {r.get("Character Name", "?")} [{r.get("Category", "")}]'
             for r in results[1:6]
         )
         safe_add_field(embed, name=f'More Matches ({len(results) - 1})', value=additional, inline=False)
-    
+
     embed.set_footer(text=f'Matches: {len(results)} | Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
 
@@ -2081,7 +2140,7 @@ async def characters_by_category_cmd(interaction: discord.Interaction, category:
     if not is_available:
         await interaction.response.send_message(embed=error_embed)
         return
-    
+
     q = sanitize_query(category).lower().strip()
     if not q:
         embed = Embed(title='Empty Query',
@@ -2089,10 +2148,10 @@ async def characters_by_category_cmd(interaction: discord.Interaction, category:
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
-    
+
     # Exact category match (case-insensitive)
     results = [c for c in dm.char_data if q == c.get('Category', '').lower().strip()]
-    
+
     if not results:
         embed = Embed(
             title='No Results Found',
@@ -2104,10 +2163,10 @@ async def characters_by_category_cmd(interaction: discord.Interaction, category:
         )
         await interaction.response.send_message(embed=embed)
         return
-    
+
     embed = Embed(title=f'Characters: {category.title()}', color=CFG.color_primary)
     embed.description = f'Found **{len(results)}** characters'
-    
+
     for char in results[:10]:
         name = char.get('Character Name', '?')
         alt = char.get('Alternative Name', '')
@@ -2116,12 +2175,12 @@ async def characters_by_category_cmd(interaction: discord.Interaction, category:
         if alt:
             field_value += f'\n*Alt: {alt}*'
         safe_add_field(embed, name=name, value=field_value, inline=False)
-    
+
     if len(results) > 10:
         embed.set_footer(text=f'Showing 10 of {len(results)} results | Source: {dm.current_source["name"]}')
     else:
         embed.set_footer(text=f'Source: {dm.current_source["name"]}')
-    
+
     await interaction.response.send_message(embed=embed)
 
 # ============================================
@@ -2135,14 +2194,14 @@ async def on_app_command_error(
 ):
     """Handle slash command errors gracefully."""
     logger.error(f'Slash command error: {type(error).__name__}: {error}')
-    
+
     embed = Embed(
         title='Something went wrong',
         description='An unexpected error occurred while running this command.\n'
                     'Please try again, or contact the bot administrator if the issue persists.',
         color=CFG.color_error
     )
-    
+
     try:
         if interaction.response.is_done():
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -2173,61 +2232,67 @@ async def on_command_error(ctx, error):
 
 @bot.event
 async def on_ready():
-    global EPISODES
-    
     logger.info(f'Logged in as {bot.user}')
     logger.info('Syncing slash commands...')
     synced = await bot.tree.sync()
     logger.info(f'Synced {len(synced)} GLOBAL commands')
-    
+
     if bot.guilds:
         logger.info(f'Bot is in {len(bot.guilds)} guild(s)')
-    
-    logger.info('\nLoading initial database...')
-    logger.info(f'   Default source: {dm.current_source["name"]} ({dm.current_source["type"]})')
-    
+
+    logger.info('\n=== Loading Initial Databases ===')
+    logger.info(f'Default source: {dm.current_source["name"]} ({dm.current_source["type"]})')
+
+    # Step 1: Try JSON database
     success = dm.load_json_database()
-    if not success:
-        logger.warning('Initial JSON database load failed. Bot will run with empty database.')
-        logger.info('Use /source_change 2 to load CSV (local offline mode)')
-        logger.info('Use /source_change 3 to load Characters CSV (requires internet)')
-    else:
-        logger.info(f'Database loaded successfully ({len(dm.episodes)} records)')
-        # Build search index for JSON data
+    if success:
+        logger.info(f'✓ JSON database loaded ({len(dm.episodes)} records)')
         search_index.build_story_index(dm.episodes)
-    
-    logger.info('\nAttempting to load CSV from local path...')
+    else:
+        logger.warning('✗ JSON database load failed')
+
+    # Step 2: Try local CSV database (non-blocking)
     csv_success = dm.load_csv_database_local(CFG.csv_local_path)
     if csv_success:
         async with dm._lock:
             dm.episodes = dm.convert_csv_to_episode_format(dm.csv_stories)
         dm.csv_data_loaded = True
-        logger.info(f'CSV loaded successfully ({len(dm.csv_stories)} stories - CSV mode active)')
-        # Update current source if CSV loaded at startup
+        logger.info(f'✓ Local CSV loaded ({len(dm.csv_stories)} stories)')
         dm.current_source.update(dm.available_sources[1])
     else:
-        logger.info('CSV not available (use /source_change 2 when ready)')
-    
-    logger.info('\nAttempting to load Characters CSV from GitHub...')
-    if AIOHTTP_AVAILABLE:
-        char_success = await dm.load_char_csv_remote(CHAR_CSV_RAW_URL)
-        if char_success:
-            logger.info(f'Characters CSV loaded successfully ({len(dm.char_data)} characters)')
-            logger.info('  Use /source_change 3 to switch to character mode')
-        else:
-            logger.info('Characters CSV not available (use /source_change 3 to retry)')
+        logger.info('○ Local CSV not available (use /source_change 2)')
+
+    # Step 3: Try local character database FIRST (non-blocking)
+    char_local_success = dm.load_char_csv_local(
+        os.path.join(CFG.char_csv_local_path, CHAR_CSV_FILENAME)
+    )
+    if char_local_success:
+        logger.info(f'✓ Local Characters CSV loaded ({len(dm.char_data)} characters)')
+        logger.info('  Use /source_change 4 to switch to local character mode')
     else:
-        logger.info('Cannot fetch Characters CSV - aiohttp not installed')
-    
-    logger.info(f'\nStatus:')
-    logger.info(f'   Core commands: OK')
-    logger.info(f'   Source commands: OK')
-    logger.info(f'   CSV features: {"Ready" if dm.csv_data_loaded else "Disabled (/source_change 2)"}')
-    logger.info(f'   Character features: {"Ready" if dm.char_data_loaded else "Disabled (/source_change 3)"}')
-    logger.info(f'   Search indexing: Enabled')
-    logger.info(f'   Rate limiting: Enabled')
-    logger.info(f'   Search cache: Enabled (TTL: {CFG.search_cache_ttl}s)')
-    logger.info(f'\nBot is ready!')
+        # Step 4: If local fails, try remote (only if aiohttp available)
+        if AIOHTTP_AVAILABLE:
+            logger.info('Attempting to fetch Characters CSV from GitHub...')
+            char_remote_success = await dm.load_char_csv_remote(CHAR_CSV_RAW_URL)
+            if char_remote_success:
+                logger.info(f'✓ Remote Characters CSV loaded ({len(dm.char_data)} characters)')
+                logger.info('  Use /source_change 3 to switch to remote character mode')
+            else:
+                logger.info('○ Remote Characters CSV unavailable')
+        else:
+            logger.info('○ Cannot fetch Characters CSV - aiohttp not installed')
+
+    # Final status summary
+    logger.info('\n=== Status Summary ===')
+    logger.info(f'Core commands: OK')
+    logger.info(f'Source commands: OK')
+    logger.info(f'JSON DB: {"✓ Ready" if dm.episodes else "✗ Disabled"}')
+    logger.info(f'CSV Features: {"✓ Ready" if dm.csv_data_loaded else "○ Disabled (/source_change 2)"}')
+    logger.info(f'Character Features: {"✓ Ready" if dm.char_data_loaded else "○ Disabled (/source_change 3 or 4)"}')
+    logger.info(f'Search indexing: Enabled')
+    logger.info(f'Rate limiting: {CFG.rate_per_user}/min per user')
+    logger.info(f'Search cache: Enabled (TTL: {CFG.search_cache_ttl}s)')
+    logger.info('\n✅ Bot is ready!\n')
 
 # ============================================
 # MAIN EXECUTION
@@ -2239,7 +2304,7 @@ if __name__ == '__main__':
     logger.info(f'Running in: {CFG.home_dir}')
     logger.info(f'Python version: {sys.version}')
     logger.info('=' * 60)
-    
+
     try:
         bot.run(TOKEN)
     except Exception as e:
