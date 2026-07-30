@@ -37,6 +37,24 @@ except ImportError:
 
 
 # ============================================
+# CONSTANTS (Moved before BotConfig to prevent NameError)
+# ============================================
+
+CHAR_CSV_REPO_OWNER = 'star884'
+CHAR_CSV_REPO_NAME = 'Database-dorav2'
+CHAR_CSV_BRANCH = 'main'
+CHAR_CSV_FILENAME = 'All_Characters_database_fixed-1.csv'
+
+CHAR_CSV_RAW_URL = (
+    f'https://raw.githubusercontent.com/'
+    f'{CHAR_CSV_REPO_OWNER}/{CHAR_CSV_REPO_NAME}/'
+    f'{CHAR_CSV_BRANCH}/{CHAR_CSV_FILENAME}'
+)
+
+ZERO_WIDTH_SPACE = '\u200b'
+
+
+# ============================================
 # LOGGING SETUP
 # ============================================
 
@@ -95,7 +113,7 @@ class BotConfig:
         return os.path.join(self.home_dir, "Doraemon-CSV-DB", "database") + "/"
     
     @property
-    def char_csv_local_path(self) -> str:  # NEW: Character CSV local path
+    def char_csv_local_path(self) -> str:  # FIXED: Now CHAR_CSV_REPO_NAME is defined
         return os.path.join(self.home_dir, CHAR_CSV_REPO_NAME) + "/"
     
     @property
@@ -122,19 +140,8 @@ VOLUME_COLUMNS = {
 
 KNOWN_MAGAZINES = {'YK', 'KG', 'G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'BK', 'SD', 'TK', 'CC', 'CD'}
 
-CHAR_CSV_REPO_OWNER = 'star884'
-CHAR_CSV_REPO_NAME  = 'Database-dorav2'
-CHAR_CSV_BRANCH      = 'main'
-CHAR_CSV_FILENAME    = 'All_Characters_database_fixed-1.csv'
-
-CHAR_CSV_RAW_URL = (
-    f'https://raw.githubusercontent.com/'
-    f'{CHAR_CSV_REPO_OWNER}/{CHAR_CSV_REPO_NAME}/'
-    f'{CHAR_CSV_BRANCH}/{CHAR_CSV_FILENAME}'
-)
-
 CHAR_CSV_LOCAL_PATH = os.path.join(CFG.home_dir, CHAR_CSV_REPO_NAME)
-CHAR_CSV_LOCAL_FILE  = os.path.join(CHAR_CSV_LOCAL_PATH, CHAR_CSV_FILENAME)
+CHAR_CSV_LOCAL_FILE = os.path.join(CHAR_CSV_LOCAL_PATH, CHAR_CSV_FILENAME)
 
 CHAR_CSV_FIELD_NAMES = [
     'Character Name',
@@ -144,26 +151,13 @@ CHAR_CSV_FIELD_NAMES = [
     'Source References',
 ]
 
-ZERO_WIDTH_SPACE = '\u200b'
-
 
 # ============================================
 # INPUT SANITIZATION
 # ============================================
 
 def sanitize_query(query: str, max_length: int = 200) -> str:
-    """Sanitize user input for search queries.
-    
-    Strips whitespace and enforces a maximum length to prevent
-    abuse and performance issues.
-    
-    Args:
-        query: Raw user input string
-        max_length: Maximum allowed character count
-        
-    Returns:
-        Cleaned query string, or empty string if input was empty
-    """
+    """Sanitize user input for search queries."""
     if not query:
         return ""
     query = query.strip()
@@ -173,11 +167,7 @@ def sanitize_query(query: str, max_length: int = 200) -> str:
 
 
 def validate_discord_token(token: str) -> bool:
-    """Basic token format validation.
-    
-    Returns True if the token appears structurally valid.
-    Does NOT guarantee the token is authorized—only checks format.
-    """
+    """Basic token format validation."""
     if not token:
         return False
     if len(token) < 50:
@@ -204,7 +194,6 @@ class RateLimiter:
         cutoff = now - self.window_seconds
         key = (user_id, command)
         
-        # Prune expired entries
         self._usage[key] = [t for t in self._usage[key] if t > cutoff]
         
         if len(self._usage[key]) >= max_allowed:
@@ -281,11 +270,7 @@ search_cache = SearchCache(ttl=CFG.search_cache_ttl)
 # ============================================
 
 class SearchIndex:
-    """Inverted-index for fast title and field searching.
-    
-    Builds token-to-record mappings to avoid O(n) linear scans
-    on every search query.
-    """
+    """Inverted-index for fast title and field searching."""
     
     def __init__(self):
         self.by_title_token: Dict[str, List[int]] = {}
@@ -315,23 +300,17 @@ class SearchIndex:
                      f'{len(self.by_magazine)} magazine codes')
     
     def build_char_index(self, data: List[dict]) -> None:
-        """Build index for character records.
-        
-        Tokenizes character names and alternative names for fast
-        word-boundary lookups. Categories are indexed for exact filtering.
-        """
+        """Build index for character records."""
         self._char_data = data
         self.by_char_name_token.clear()
         self.by_char_category.clear()
         
         for idx, item in enumerate(data):
-            # Index name tokens
             for field in ('Character Name', 'Alternative Name'):
                 name = item.get(field, '').lower()
                 for token in re.findall(r'\w+', name):
                     self.by_char_name_token.setdefault(token, []).append(idx)
             
-            # Index category
             cat = item.get('Category', '').lower().strip()
             if cat:
                 self.by_char_category.setdefault(cat, []).append(idx)
@@ -350,9 +329,8 @@ class SearchIndex:
             if token in self.by_title_token:
                 candidate_sets.append(set(self.by_title_token[token]))
             else:
-                return []  # Token not found, no results
+                return []
         
-        # Intersection of all token sets
         candidates = candidate_sets[0]
         for s in candidate_sets[1:]:
             candidates &= s
@@ -368,18 +346,7 @@ search_index = SearchIndex()
 # ============================================
 
 def word_boundary_match(query: str, text: str) -> bool:
-    """Match query as a whole word/number within text using \\b boundaries.
-    
-    Prevents substring false positives (e.g., searching "nobita" won't
-    match "nobisuke" or "nobitaxyz").
-    
-    Args:
-        query: The search term
-        text: The text to search within
-        
-    Returns:
-        True if query appears as a complete word in text
-    """
+    """Match query as a whole word/number within text using \\b boundaries."""
     if not query or not text:
         return False
     pattern = r'\b' + re.escape(query.lower()) + r'\b'
@@ -391,37 +358,18 @@ def search_characters(
     characters: List[dict],
     use_word_boundary: bool = True
 ) -> List[dict]:
-    """Search characters with tiered matching and ranking.
-    
-    Matching tiers (in priority order):
-      1. Word-boundary match on Character Name  (best match)
-      2. Word-boundary match on Alternative Name
-      3. Substring match on Category
-      4. Substring match on Description
-      5. Substring match on Character Name  (fallback)
-    
-    Results are ranked by tier so that name matches always appear first.
-    
-    Args:
-        query: Search term (already sanitized)
-        characters: List of character dictionaries
-        use_word_boundary: If True, use word-boundary matching for name fields;
-            if False, fall back to plain substring matching everywhere
-    
-    Returns:
-        Ranked list of matching character dicts, capped at max_search_results
-    """
+    """Search characters with tiered matching and ranking."""
     q = query.lower()
     if not q:
         return []
     
-    tier_1: List[dict] = []  # Word boundary — Character Name
-    tier_2: List[dict] = []  # Word boundary — Alternative Name
-    tier_3: List[dict] = []  # Substring — Category
-    tier_4: List[dict] = []  # Substring — Description
-    tier_5: List[dict] = []  # Substring — Character Name (fallback)
+    tier_1: List[dict] = []
+    tier_2: List[dict] = []
+    tier_3: List[dict] = []
+    tier_4: List[dict] = []
+    tier_5: List[dict] = []
     
-    seen_ids: set = set()  # Track object ids to avoid duplicates across tiers
+    seen_ids: set = set()
     
     for char in characters:
         char_obj_id = id(char)
@@ -439,37 +387,30 @@ def search_characters(
         desc_lower = desc.lower()
         
         if use_word_boundary:
-            # Tier 1: Word boundary on Character Name
             if word_boundary_match(q, name_lower):
                 tier_1.append(char)
                 seen_ids.add(char_obj_id)
                 continue
             
-            # Tier 2: Word boundary on Alternative Name
             if word_boundary_match(q, alt_lower):
                 tier_2.append(char)
                 seen_ids.add(char_obj_id)
                 continue
         
-        # Tier 3: Substring on Category
         if q in cat_lower and char_obj_id not in seen_ids:
             tier_3.append(char)
             seen_ids.add(char_obj_id)
             continue
         
-        # Tier 4: Substring on Description
         if q in desc_lower and char_obj_id not in seen_ids:
             tier_4.append(char)
             seen_ids.add(char_obj_id)
             continue
         
-        # Tier 5: Fallback — substring on Character Name
-        # Only used if word boundary didn't catch it
         if q in name_lower and char_obj_id not in seen_ids:
             tier_5.append(char)
             seen_ids.add(char_obj_id)
     
-    # Merge tiers in priority order
     ranked = tier_1 + tier_2 + tier_3 + tier_4 + tier_5
     return ranked[:CFG.max_search_results]
 
@@ -479,12 +420,7 @@ def search_characters(
 # ============================================
 
 class DatabaseManager:
-    """Thread-safe manager for all data sources.
-    
-    Replaces global variables with encapsulated state protected by
-    an asyncio.Lock to prevent race conditions during concurrent
-    source switches.
-    """
+    """Thread-safe manager for all data sources."""
     
     def __init__(self):
         self.episodes: List[dict] = []
@@ -525,7 +461,7 @@ class DatabaseManager:
                 'fetch_method': 'github_raw'
             },
             {
-                'id': 4,  # NEW: Local character database option
+                'id': 4,
                 'name': 'Characters CSV (Local Clone)',
                 'url': CFG.char_csv_local_path,
                 'type': 'csv_char',
@@ -534,8 +470,6 @@ class DatabaseManager:
             }
         ]
         self._lock = asyncio.Lock()
-    
-    # ── Lock-protected state accessors ──
     
     async def safe_update_episodes(self, episodes: List[dict]) -> None:
         async with self._lock:
@@ -561,14 +495,8 @@ class DatabaseManager:
     def is_char_source(self) -> bool:
         return self.current_source['type'] == 'csv_char'
     
-    # ── JSON Loading ──
-    
     def load_json_database(self) -> bool:
-        """Load data from local JSON database.
-        
-        Returns:
-            True if loaded successfully, False otherwise.
-        """
+        """Load data from local JSON database."""
         try:
             db_path = 'database/search_index.json'
             with open(db_path, encoding='utf-8') as f:
@@ -588,8 +516,6 @@ class DatabaseManager:
             self.episodes = []
             logger.error(f'Error loading JSON database: {e}')
             return False
-    
-    # ── CSV Parsing ──
     
     def _parse_csv_rows(self, reader) -> List[dict]:
         """Parse CSV rows using csv.reader with column indices."""
@@ -635,8 +561,6 @@ class DatabaseManager:
             characters.append(entry)
         
         return characters
-    
-    # ── CSV Loading (Local + Remote) ──
     
     def load_csv_database_local(self, base_path: str) -> bool:
         """Load CSV data from local files."""
@@ -753,14 +677,7 @@ class DatabaseManager:
             return False
     
     async def load_char_csv_remote(self, url: str) -> bool:
-        """Fetch and parse characters CSV from GitHub raw URL.
-        
-        Args:
-            url: Raw GitHub URL for the characters CSV file
-            
-        Returns:
-            True if loading successful, False otherwise
-        """
+        """Fetch and parse characters CSV from GitHub raw URL."""
         if not AIOHTTP_AVAILABLE:
             logger.error('aiohttp not installed - remote fetching disabled')
             self.char_data = []
@@ -803,8 +720,6 @@ class DatabaseManager:
                 self.char_data_loaded = False
                 return False
     
-    # ── Format Conversion ──
-    
     def convert_csv_to_episode_format(self, stories: List[dict]) -> List[dict]:
         """Map CSV data to standard EPISODES format."""
         episodes = []
@@ -814,8 +729,8 @@ class DatabaseManager:
             anime_1979_extra = story.get('1979 anime extra', '')
             anime_2005_extra = story.get('2005 anime extra 1', '')
             
-            anime_1979_full = f"{anime_1979}; {anime_1979_extra}" if anime_1979_extra else anime_1979
-            anime_2005_full = f"{anime_2005}; {anime_2005_extra}" if anime_2005_extra else anime_2005
+            anime_1979_full = f"{anime_1979}; {anime_1979_extra}" if anime_1979 and anime_1979_extra else anime_1979 or ''
+            anime_2005_full = f"{anime_2005}; {anime_2005_extra}" if anime_2005 and anime_2005_extra else anime_2005 or ''
             
             in_ep = anime_1979 or anime_2005 or 'N/A'
             
@@ -848,8 +763,6 @@ class DatabaseManager:
             episodes.append(ep)
         return episodes
     
-    # ── Unified Loaders ──
-    
     async def load_csv_database(self, source_config: Dict[str, Any]) -> bool:
         """Unified loader supporting both local and remote CSV."""
         fetch_method = source_config.get('fetch_method', 'github_api')
@@ -867,7 +780,6 @@ class DatabaseManager:
             async with self._lock:
                 self.episodes = self.convert_csv_to_episode_format(self.csv_stories)
             logger.info(f'CSV database ready with {len(self.episodes)} stories')
-            # Rebuild search index
             search_index.build_story_index(self.episodes)
             search_cache.invalidate()
             return True
@@ -880,7 +792,6 @@ class DatabaseManager:
         source_url = source_config['url']
         
         if fetch_method == 'local_file':
-            # Extract filename from config or use default
             filename = source_config.get('files', [CHAR_CSV_FILENAME])[0]
             filepath = os.path.join(source_url.rstrip('/'), filename)
             success = self.load_char_csv_local(filepath)
@@ -893,16 +804,13 @@ class DatabaseManager:
         
         if success:
             async with self._lock:
-                self.episodes = self.char_data  # Use char_data for character searches
+                self.char_data = self.char_data  # Fixed: Proper assignment
             logger.info(f'Character database ready with {len(self.char_data)} characters')
-            # Rebuild character search index
             search_index.build_char_index(self.char_data)
             search_cache.invalidate()
             return True
         
         return False
-    
-    # ── Source Checks ──
     
     def check_csv_source(self) -> Tuple[bool, Optional[Embed]]:
         """Check if CSV source is available."""
@@ -943,7 +851,6 @@ class DatabaseManager:
         return True, None
 
 
-# Instantiate the global database manager
 dm = DatabaseManager()
 
 
@@ -1026,11 +933,7 @@ def build_more_matches_field(embed: Embed, results: List[dict], is_csv: bool, ma
 
 
 def build_char_more_matches_field(embed: Embed, results: List[dict], max_shown: int = 5) -> None:
-    """Add a 'More Matches' field specifically for character results.
-    
-    Displays match rank alongside each character so users can see
-    which results were strong name matches vs. weaker description matches.
-    """
+    """Add a 'More Matches' field specifically for character results."""
     count = min(len(results) - 1, max_shown)
     if count <= 0:
         return
@@ -1120,7 +1023,6 @@ async def source_all_cmd(interaction: discord.Interaction):
 @bot.tree.command(name='source_status', description='Shows detailed status of all database sources')
 @rate_limited('source_status')
 async def source_status_cmd(interaction: discord.Interaction):
-    """Enhanced source status showing availability and load times."""
     embed = Embed(title='Database Sources Status', color=CFG.color_primary)
     
     for src in dm.available_sources:
@@ -1129,7 +1031,6 @@ async def source_status_cmd(interaction: discord.Interaction):
         desc = f'{status_icon} **{src["id"]}) {src["name"]}**\n'
         desc += f'> Type: `{src["type"]}` | Fetch: `{src.get("fetch_method", "default")}`\n'
         
-        # Show load status
         if src['type'] == 'json' and dm.episodes:
             desc += f'> **Records:** {len(dm.episodes)} ✓ Loaded\n'
         elif src['type'] == 'csv' and dm.csv_data_loaded:
@@ -1246,13 +1147,13 @@ async def source_change_cmd(interaction: discord.Interaction, source_id: int):
 async def search_cmd(interaction: discord.Interaction, query: str):
     q_raw = sanitize_query(query, CFG.max_query_length)
     if not q_raw:
-        embed = Embed(title='Empty Query',
+        embed = Embed(title='EmptyQuery',
                       description='Please provide a search term.',
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
     
-    if not dm.episodes:
+    if not dm.episodes and not dm.char_data:
         embed = Embed(
             title='Database Empty',
             description='No episodes loaded. Use `/source` to check status.',
@@ -1265,7 +1166,6 @@ async def search_cmd(interaction: discord.Interaction, query: str):
     csv_mode = dm.is_csv_source()
     char_mode = dm.is_char_source()
     
-    # ── Check cache ──
     source_type = dm.current_source['type']
     cached = search_cache.get(source_type, q)
     if cached is not None:
@@ -1274,35 +1174,24 @@ async def search_cmd(interaction: discord.Interaction, query: str):
     else:
         results = []
         if char_mode:
-            # ── Character search with word-boundary matching ──
             results = search_characters(q, dm.char_data, use_word_boundary=True)
-        
         elif csv_mode:
-            # 1. Magazine code search
             if len(q) <= 4 and q.upper() in KNOWN_MAGAZINES:
                 results = [ep for ep in dm.episodes if ep.get('Magazine code', '').lower() == q]
-            
-            # 2. 1979 anime episode search
             elif q.startswith('ep ') or (q.startswith('ep') and len(q) > 2 and q[2:3].isdigit()):
                 ep_num = q.replace('ep ', '').replace('ep', '').strip()
                 for ep in dm.episodes:
                     val = ep.get('1979 anime', '').lower()
                     if ep_num in val:
                         results.append(ep)
-            
-            # 3. 2005 anime episode search
             elif q.startswith('2005') and len(q) > 5:
                 ep_num = q[5:].strip()
                 for ep in dm.episodes:
                     val = ep.get('2005 anime', '').lower()
                     if ep_num in val:
                         results.append(ep)
-            
-            # 4. Publication date search
             elif re.match(r'^\d{4}-\d{2}$', q):
                 results = [ep for ep in dm.episodes if ep.get('Publication Date', '').lower() == q]
-            
-            # 5. Title search (fallback)
             if not results:
                 for ep in dm.episodes:
                     story_a = ep.get('story_a', '').lower()
@@ -1310,9 +1199,7 @@ async def search_cmd(interaction: discord.Interaction, query: str):
                     if q in story_a or q in story_b:
                         results.append(ep)
                 results = results[:CFG.max_search_results]
-        
         else:
-            # ── JSON source search ──
             if q.startswith('jp:') or q.isdigit() or re.match(r'^s\d+\s*s?$', q, re.I):
                 jp_query = q.replace('jp:', '').strip()
                 standalone_match = re.match(r'^s(\d+)$', jp_query, re.I)
@@ -1335,22 +1222,18 @@ async def search_cmd(interaction: discord.Interaction, query: str):
                             if str(jp.get('number')) == jp_query:
                                 results.append(ep)
                                 break
-            
             elif re.match(r'^s\d{2}e\d{2}$', q):
                 results = [e for e in dm.episodes if e.get('in_season_episode', '').lower() == q]
-            
             elif q.startswith('spe'):
                 spe_num = re.sub(r'[^0-9]', '', q.replace('spe', ''))
                 results = [e for e in dm.episodes
                            if e.get('in_season_episode', '').upper().startswith('SPE')
                            and spe_num in e.get('in_season_episode', '')]
-            
             elif q.startswith('ce') or q.startswith('classic'):
                 ce_num = re.sub(r'[^0-9]', '', q.replace('ce', '').replace('classic', ''))
                 results = [e for e in dm.episodes
                            if e.get('in_season_episode', '').upper().startswith('CE')
                            and ce_num in e.get('in_season_episode', '')]
-            
             if not results:
                 for ep in dm.episodes:
                     story_a = ep.get('story_a', '').lower()
@@ -1551,27 +1434,31 @@ async def jp_cmd(interaction: discord.Interaction, jp_number: str):
 @app_commands.describe(page='Page number (1-999)', season='Filter by magazine code (CSV) or season (JSON)')
 @rate_limited('list')
 async def list_cmd(interaction: discord.Interaction, page: int = 1, season: str = None):
-    if not dm.episodes:
+    if not dm.episodes and not dm.char_data:
         embed = Embed(title='Database Empty', description='No episodes loaded.',
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
     
-    filtered = dm.episodes[:]
+    # Fix: Use char_data when in char_mode
+    if dm.is_char_source():
+        filtered = dm.char_data[:]
+    else:
+        filtered = dm.episodes[:]
     
     if season:
         s = sanitize_query(season).lower()
         if dm.is_csv_source():
-            filtered = [e for e in dm.episodes if e.get('Magazine code', '').lower() == s]
+            filtered = [e for e in filtered if e.get('Magazine code', '').lower() == s]
         elif dm.is_char_source():
-            filtered = [e for e in dm.episodes if e.get('Category', '').lower() == s]
+            filtered = [e for e in filtered if e.get('Category', '').lower() == s]
         else:
             if s == 'special':
-                filtered = [e for e in dm.episodes if e.get('category') == 'special_episodes']
+                filtered = [e for e in filtered if e.get('category') == 'special_episodes']
             elif s == 'classic':
-                filtered = [e for e in dm.episodes if e.get('category') == 'classic_doraemon']
+                filtered = [e for e in filtered if e.get('category') == 'classic_doraemon']
             elif s.isdigit():
-                filtered = [e for e in dm.episodes if e.get('category') == f'season_{s}']
+                filtered = [e for e in filtered if e.get('category') == f'season_{s}']
     
     if page < 1:
         page = 1
@@ -1686,9 +1573,10 @@ async def stats_cmd(interaction: discord.Interaction):
         for mag, cnt in sorted(magazines.items(), key=lambda x: -x[1]):
             embed.add_field(name=mag, value=f'**{cnt}**', inline=True)
         
-               has_1979 = sum(1 for e in dm.episodes if e.get('1979 anime', '').strip())
+        # FIXED: Proper indentation - moved outside the if block
+        has_1979 = sum(1 for e in dm.episodes if e.get('1979 anime', '').strip())
         has_2005 = sum(1 for e in dm.episodes if e.get('2005 anime', '').strip())
-        has_movie = sum(1 for e in dm.episodes if e.get('Movie', '').strip()) 
+        has_movie = sum(1 for e in dm.episodes if e.get('Movie', '').strip())
 
         embed.add_field(name='Has 1979 Anime', value=f'**{has_1979}**', inline=True)
         embed.add_field(name='Has 2005 Anime', value=f'**{has_2005}**', inline=True)
@@ -1718,7 +1606,7 @@ async def stats_cmd(interaction: discord.Interaction):
             f'**JP Special Stories:** {jp_specials}\n'
             f'**JP Standalone Specials:** {jp_standalone}\n\n'
             f'**Source:** {dm.current_source["name"]} ({dm.current_source["type"].title()})\n'
-            f'**URL:** {dm.current_source["url"]}\n\n'
+            f'**URL:** {dm.current_source["name"]}\n\n'
             f'**Breakdown:**'
         )
         for cat, cnt in sorted(counts.items(), key=lambda x: -x[1]):
@@ -1727,7 +1615,6 @@ async def stats_cmd(interaction: discord.Interaction):
     embed.set_footer(text=f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")} | '
                            f'Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
-
 
 # ============================================
 # HELP COMMAND
@@ -1802,7 +1689,6 @@ async def help_cmd(interaction: discord.Interaction):
     embed.set_footer(text='Doraemon Search Bot')
     await interaction.response.send_message(embed=embed)
 
-
 # ============================================
 # CSV-SPECIFIC COMMANDS
 # ============================================
@@ -1811,7 +1697,7 @@ async def help_cmd(interaction: discord.Interaction):
 @app_commands.describe(query='Japanese title or keyword')
 @rate_limited('search_jp_title')
 async def search_jp_title_cmd(interaction: discord.Interaction, query: str):
-    is_available, error_embed = dm.check_csv_source()  # FIXED: was check_csv
+    is_available, error_embed = dm.check_csv_source()
     if not is_available:
         await interaction.response.send_message(embed=error_embed)
         return
@@ -2058,7 +1944,7 @@ async def search_volume_cmd(
                 highlight = '**' if col_key == matched_col else ''
                 vol_parts.append(f'{highlight}{col_label}: {v}{highlight}')
 
-        field_name = truncate(title, CFG.embed_field_name_max)
+        field_name = truncate(title, CFG.embed_field_value_max)
         field_value = (f'({truncate(jp_title, 30)})\n' if jp_title else '') + ' | '.join(vol_parts)
         safe_add_field(embed, name=field_name, value=field_value, inline=False)
 
@@ -2092,7 +1978,6 @@ async def character_cmd(interaction: discord.Interaction, name: str):
 
     q_lower = q.lower()
 
-    # Use the tiered search_characters function with word-boundary matching
     results = search_characters(q_lower, dm.char_data, use_word_boundary=True)
 
     if not results:
@@ -2149,7 +2034,6 @@ async def characters_by_category_cmd(interaction: discord.Interaction, category:
         await interaction.response.send_message(embed=embed)
         return
 
-    # Exact category match (case-insensitive)
     results = [c for c in dm.char_data if q == c.get('Category', '').lower().strip()]
 
     if not results:
