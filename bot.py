@@ -4,6 +4,8 @@ import re
 import csv
 import asyncio
 from datetime import datetime
+
+import discord                                          # FIX: added
 from discord import app_commands, Embed, Intents
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -453,7 +455,7 @@ async def load_char_csv_remote(url: str) -> bool:
                     char_data = _parse_char_csv_rows(csv.reader(lines))
                     char_data_loaded = True
                     print(f'Loaded {len(char_data)} characters from remote CSV')
-                    
+
                     if char_data:
                         first = char_data[0]
                         print(f'  First: {first.get("Character Name", "?")} | '
@@ -534,7 +536,7 @@ async def load_csv_database(source_config: dict) -> bool:
 async def load_char_database(source_config: dict) -> bool:
     """Load character database (remote only)."""
     global EPISODES, char_data, char_data_loaded
-    
+
     fetch_method = source_config.get('fetch_method', 'github_raw')
     source_url = source_config['url']
 
@@ -542,12 +544,12 @@ async def load_char_database(source_config: dict) -> bool:
         success = load_char_csv_local(source_url)
     else:
         success = await load_char_csv_remote(source_url)
-    
+
     if success:
         EPISODES = char_data  # Use char_data directly for character searches
         print(f'Character database ready with {len(char_data)} characters')
         return True
-    
+
     return False
 
 def check_csv_source() -> tuple[bool, Embed | None]:
@@ -737,17 +739,17 @@ async def search_cmd(interaction: discord.Interaction, query: str):
     if char_mode:
         # Character search mode
         search_type = 'character'
-        
+
         # Search by character name, alternative name, category, or description
         for char in char_data:
             name = char.get('Character Name', '').lower()
             alt = char.get('Alternative Name', '').lower()
             cat = char.get('Category', '').lower()
             desc = char.get('Description', '').lower()
-            
+
             if q in name or q in alt or q in cat or q in desc:
                 results.append(char)
-        
+
         # Limit to 10 results
         results = results[:10]
 
@@ -862,7 +864,7 @@ async def search_cmd(interaction: discord.Interaction, query: str):
             '- IN Episode: `s04e35`\n'
             '- Title: `nobita`'
         )
-        
+
         embed = Embed(
             title='No Results Found',
             description=f'No results found for "**{query}**"\n\n'
@@ -881,17 +883,17 @@ async def search_cmd(interaction: discord.Interaction, query: str):
         cat = first.get('Category', 'Unknown')
         desc = first.get('Description', '')
         refs = first.get('Source References', '')
-        
+
         embed = Embed(title=f'Character Found: {truncate(name, 70)}', color=COLOR_PRIMARY)
-        
+
         if alt:
             embed.add_field(name='Alternative Name', value=alt, inline=True)
         else:
             embed.add_field(name='Alternative Name', value='N/A', inline=True)
-        
+
         embed.add_field(name='Category', value=cat, inline=True)
         embed.add_field(name='Description', value=truncate(desc, EMBED_FIELD_VALUE_MAX), inline=False)
-        
+
         if refs:
             embed.add_field(name='Source References', value=truncate(refs, EMBED_FIELD_VALUE_MAX), inline=False)
 
@@ -1040,12 +1042,12 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, season: str 
 
     chunk = filtered[start:end]
     filter_display = season if season else 'All'
-    
+
     if is_char_source():
         embed = Embed(title=f'Characters - Page {page} ({filter_display})', color=COLOR_PRIMARY)
     else:
         embed = Embed(title=f'Doraemon Episodes - Page {page} ({filter_display})', color=COLOR_PRIMARY)
-    
+
     embed.description = f'Total: **{len(filtered)}** | Showing {start + 1}-{end}'
 
     csv_mode = is_csv_source()
@@ -1074,7 +1076,7 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, season: str 
                 field_value += f' | 1979: {anime_1979}'
             if anime_2005:
                 field_value += f' | 2005: {anime_2005}'
-            safe_add_field(embed, name=field_name, value=field_value, inline=False)  # FIXED: Was duplicated/malformed
+            safe_add_field(embed, name=field_name, value=field_value, inline=False)
         else:
             in_ep = r.get('in_season_episode', 'N/A')
             jp_st = r.get('jp_story_all', '-') or '-'
@@ -1503,14 +1505,13 @@ async def character_cmd(interaction: discord.Interaction, name: str):
 
     q = name.lower().strip()
     results = []
-        for char in char_data:
+    for char in char_data:                                   # FIX: removed extra indentation
         cname = char.get('Character Name', '').lower()
         alt = char.get('Alternative Name', '').lower()
         cat = char.get('Category', '').lower()
         desc = char.get('Description', '').lower()
 
-        if q in cname or q in alt or q in cat or q in desc:
-            results.append(char)
+        if q in cname or q in alt or q in cat or q in desc:                    results.append(char)
 
     if not results:
         embed = Embed(
@@ -1537,7 +1538,7 @@ async def character_cmd(interaction: discord.Interaction, name: str):
 
     if len(results) > 1:
         additional = '\n'.join(
-            f'- {r.get("Character Name", "?")} [{r.get("Category", "")}]' 
+            f'- {r.get("Character Name", "?")} [{r.get("Category", "")}]'
             for r in results[1:6]
         )
         safe_add_field(embed, name=f'More Matches ({len(results) - 1})', value=additional, inline=False)
