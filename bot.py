@@ -487,7 +487,7 @@ class DatabaseManager:
     
     async def safe_update_source(self, source: Dict[str, Any]) -> None:
         async with self._lock:
-            self.current_source = source.copy()  # FIX: Use copy instead of update
+            self.current_source = source.copy()
     
     def is_csv_source(self) -> bool:
         return self.current_source['type'] == 'csv'
@@ -538,7 +538,7 @@ class DatabaseManager:
         
         return stories
     
-        def _parse_char_csv_rows(self, reader) -> List[dict]:
+    def _parse_char_csv_rows(self, reader) -> List[dict]:
         """Parse character CSV rows using the expected header, with smart source merging."""
         characters = []
         header = next(reader, None)
@@ -1647,11 +1647,6 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, filter_val: 
     await interaction.response.send_message(embed=embed)
 
 
-
-# ============================================
-# STATS COMMAND
-# ============================================
-
 # ============================================
 # STATS COMMAND
 # ============================================
@@ -1771,8 +1766,7 @@ async def stats_cmd(interaction: discord.Interaction):
                 other_lines.append(f'{cat.replace("_", " ").title()}: {cnt}')
             other_text = '\n'.join(other_lines)
             if len(other_text) > CFG.embed_field_value_max:
-                other_text = other_text[:CFG.embed_field_value_max - 1] + '…'
-            safe_add_field(embed, name=f'Other ({len(sorted_counts) - MAX_FIELDS})',
+                other             safe_add_field(embed, name=f'Other ({len(sorted_counts) - MAX_FIELDS})',
                            value=other_text, inline=False)
 
     embed.set_footer(text=f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")} | '
