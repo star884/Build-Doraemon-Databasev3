@@ -113,7 +113,7 @@ class BotConfig:
         return os.path.join(self.home_dir, "Doraemon-CSV-DB", "database") + "/"
     
     @property
-    def char_csv_local_path(self) -> str:  # FIXED: Now CHAR_CSV_REPO_NAME is defined
+    def char_csv_local_path(self) -> str:
         return os.path.join(self.home_dir, CHAR_CSV_REPO_NAME) + "/"
     
     @property
@@ -487,7 +487,7 @@ class DatabaseManager:
     
     async def safe_update_source(self, source: Dict[str, Any]) -> None:
         async with self._lock:
-            self.current_source.update(source)
+            self.current_source = source.copy()  # FIX: Use copy instead of update
     
     def is_csv_source(self) -> bool:
         return self.current_source['type'] == 'csv'
@@ -787,29 +787,53 @@ class DatabaseManager:
         return False
     
     async def load_char_database(self, source_config: Dict[str, Any]) -> bool:
-        """Load character database (local or remote) - ENHANCED WITH FALLBACK."""
+        """Load character database (local or remote) - FIXED WITH PROPER ASSIGNMENT."""
         fetch_method = source_config.get('fetch_method', 'github_raw')
         source_url = source_config['url']
+        
+        temp_char_data = []  # Store loaded data separately
         
         if fetch_method == 'local_file':
             filename = source_config.get('files', [CHAR_CSV_FILENAME])[0]
             filepath = os.path.join(source_url.rstrip('/'), filename)
-            success = self.load_char_csv_local(filepath)
             
-            if not success:
-                logger.info('Local load failed, attempting remote fallback...')
-                success = await self.load_char_csv_remote(CHAR_CSV_RAW_URL)
-        else:
-            success = await self.load_char_csv_remote(source_url)
+            # Try local first
+            if os.path.isfile(filepath):
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        temp_char_data = self._parse_char_csv_rows(csv.reader(f))
+                    logger.info(f'Local character CSV found at {filepath}')
+                except Exception as e:
+                    logger.error(f'Error reading local file: {e}')
+                    temp_char_data = []
         
-        if success:
+        # If local failed or not attempted, try remote
+        if not temp_char_data and AIOHTTP_AVAILABLE:
+            logger.info(f'Fetching characters CSV from: {CHAR_CSV_RAW_URL}')
             async with self._lock:
-                self.char_data = self.char_data  # Fixed: Proper assignment
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(CHAR_CSV_RAW_URL, timeout=CFG.http_timeout_seconds) as resp:
+                            if resp.status == 200:
+                                content = await resp.text(encoding='utf-8')
+                                lines = content.splitlines()
+                                if lines:
+                                    temp_char_data = self._parse_char_csv_rows(csv.reader(lines))
+                                    logger.info(f'Fetched {len(temp_char_data)} characters remotely')
+                except Exception as e:
+                    logger.error(f'Error fetching character CSV: {type(e).__name__}: {e}')
+        
+        # Assign loaded data
+        if temp_char_data:
+            self.char_data = temp_char_data
+            self.char_data_loaded = True
             logger.info(f'Character database ready with {len(self.char_data)} characters')
             search_index.build_char_index(self.char_data)
             search_cache.invalidate()
             return True
         
+        self.char_data = []
+        self.char_data_loaded = False
         return False
     
     def check_csv_source(self) -> Tuple[bool, Optional[Embed]]:
@@ -1427,39 +1451,50 @@ async def jp_cmd(interaction: discord.Interaction, jp_number: str):
 
 
 # ============================================
-# LIST COMMAND
+# LIST COMMAND (FIXED WITH ALPHABETICAL SORTING FOR CHARACTERS)
 # ============================================
 
-@bot.tree.command(name='list', description='List episodes with pagination')
-@app_commands.describe(page='Page number (1-999)', season='Filter by magazine code (CSV) or season (JSON)')
+@bot.tree.command(name='list', description='List episodes or characters with pagination')
+@app_commands.describe(
+    page='Page number (1-999)',
+    filter_val='Filter by magazine code (CSV), category (Chars), or season (JSON)'
+)
 @rate_limited('list')
-async def list_cmd(interaction: discord.Interaction, page: int = 1, season: str = None):
+async def list_cmd(interaction: discord.Interaction, page: int = 1, filter_val: str = None):
     if not dm.episodes and not dm.char_data:
         embed = Embed(title='Database Empty', description='No episodes loaded.',
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
     
-    # Fix: Use char_data when in char_mode
-    if dm.is_char_source():
+    csv_mode = dm.is_csv_source()
+    char_mode = dm.is_char_source()
+    
+    # Get the appropriate data source
+    if char_mode:
         filtered = dm.char_data[:]
+        # Sort alphabetically by Character Name for character listings
+        filtered.sort(key=lambda x: x.get('Character Name', '').lower())
     else:
         filtered = dm.episodes[:]
     
-    if season:
-        s = sanitize_query(season).lower()
-        if dm.is_csv_source():
-            filtered = [e for e in filtered if e.get('Magazine code', '').lower() == s]
-        elif dm.is_char_source():
-            filtered = [e for e in filtered if e.get('Category', '').lower() == s]
+    # Apply filter if provided
+    if filter_val:
+        f = sanitize_query(filter_val).lower()
+        if csv_mode:
+            filtered = [e for e in filtered if e.get('Magazine code', '').lower() == f]
+        elif char_mode:
+            filtered = [e for e in filtered if e.get('Category', '').lower() == f]
         else:
-            if s == 'special':
+            # JSON mode filtering
+            if f == 'special':
                 filtered = [e for e in filtered if e.get('category') == 'special_episodes']
-            elif s == 'classic':
+            elif f == 'classic':
                 filtered = [e for e in filtered if e.get('category') == 'classic_doraemon']
-            elif s.isdigit():
-                filtered = [e for e in filtered if e.get('category') == f'season_{s}']
+            elif f.isdigit():
+                filtered = [e for e in filtered if e.get('category') == f'season_{f}']
     
+    # Validate page number
     if page < 1:
         page = 1
     
@@ -1479,17 +1514,14 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, season: str 
     end = min(start + CFG.page_size, len(filtered))
     
     chunk = filtered[start:end]
-    filter_display = season if season else 'All'
+    filter_display = filter_val if filter_val else 'All'
     
-    if dm.is_char_source():
+    if char_mode:
         embed = Embed(title=f'Characters - Page {page} ({filter_display})', color=CFG.color_primary)
     else:
         embed = Embed(title=f'Doraemon Episodes - Page {page} ({filter_display})', color=CFG.color_primary)
     
     embed.description = f'Total: **{len(filtered)}** | Showing {start + 1}-{end}'
-    
-    csv_mode = dm.is_csv_source()
-    char_mode = dm.is_char_source()
     
     for r in chunk:
         if char_mode:
@@ -1499,7 +1531,7 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, season: str 
             field_name = f'{name} [{cat}]'
             field_value = truncate(r.get('Description', ''), 50)
             if alt:
-                field_value += f'\n**Alt Name:** {alt}'
+                field_value += f'\n*Alt Name:* {alt}'
             safe_add_field(embed, name=field_name, value=field_value, inline=False)
         elif csv_mode:
             mag = r.get('Magazine code', '?')
@@ -1527,6 +1559,7 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, season: str 
     
     embed.set_footer(text=f'Page {page} of {total_pages} | Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
+
 
 # ============================================
 # STATS COMMAND
@@ -1597,13 +1630,7 @@ async def stats_cmd(interaction: discord.Interaction):
             embed.add_field(name=mag, value=f'**{cnt}**', inline=True)
         
         # Bundle remaining into "Other"
-        if len(sorted_mags) > MAX_FIELDS:
-            other_lines = []
-            other_total = 0
-            for mag, cnt in sorted_mags[MAX_FIELDS:]:
-                other_lines.append(f'{mag}: {cnt}')
-                other_total += cnt
-            other_text = '\n'.join(other_lines)
+        if len(sorted_mags) > MAX_FIELDS:            other_text = '\n'.join(other_lines)
             if len(other_text) > CFG.embed_field_value_max:
                 other_text = other_text[:CFG.embed_field_value_max - 1] + '…'
             safe_add_field(embed, name=f'Other ({len(sorted_mags) - MAX_FIELDS})',
@@ -1685,7 +1712,7 @@ async def help_cmd(interaction: discord.Interaction):
             '  *Uses word-boundary matching for names — "nobita" matches "Nobita", not "Nobisuke"*\n'
             '- `/character <name>` - Dedicated character lookup (same word-boundary matching)\n'
             '- `/characters_by_category <category>` - Filter characters by category\n'
-            '- `/list [page] [category]` - Browse characters (filter by category)\n'
+            '- `/list [page] [category]` - Browse characters (filter by category, sorted alphabetically)\n'
             '- `/stats` - Show database statistics\n\n'
             '**Source Commands**\n'
             '- `/source` - Shows current source\n'
@@ -2088,6 +2115,9 @@ async def characters_by_category_cmd(interaction: discord.Interaction, category:
         return
 
     results = [c for c in dm.char_data if q == c.get('Category', '').lower().strip()]
+    
+    # Sort alphabetically by character name
+    results.sort(key=lambda x: x.get('Character Name', '').lower())
 
     if not results:
         embed = Embed(
@@ -2195,7 +2225,7 @@ async def on_ready():
             dm.episodes = dm.convert_csv_to_episode_format(dm.csv_stories)
         dm.csv_data_loaded = True
         logger.info(f'✓ Local CSV loaded ({len(dm.csv_stories)} stories)')
-        dm.current_source.update(dm.available_sources[1])
+        dm.current_source = dm.available_sources[1].copy()
     else:
         logger.info('○ Local CSV not available (use /source_change 2)')
 
