@@ -1766,7 +1766,8 @@ async def stats_cmd(interaction: discord.Interaction):
                 other_lines.append(f'{cat.replace("_", " ").title()}: {cnt}')
             other_text = '\n'.join(other_lines)
             if len(other_text) > CFG.embed_field_value_max:
-                other             safe_add_field(embed, name=f'Other ({len(sorted_counts) - MAX_FIELDS})',
+                other   
+                safe_add_field(embed, name=f'Other ({len(sorted_counts) - MAX_FIELDS})',
                            value=other_text, inline=False)
 
     embed.set_footer(text=f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")} | '
