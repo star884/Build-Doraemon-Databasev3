@@ -1528,7 +1528,6 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, season: str 
     embed.set_footer(text=f'Page {page} of {total_pages} | Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
 
-
 # ============================================
 # STATS COMMAND
 # ============================================
@@ -1537,6 +1536,8 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, season: str 
 @rate_limited('stats')
 async def stats_cmd(interaction: discord.Interaction):
     embed = Embed(title='Database Statistics', color=CFG.color_primary)
+    
+    MAX_FIELDS = 22  # Safe limit below Discord's 25-field cap (leaves room for extra fields)
     
     if dm.is_char_source():
         categories: Dict[str, int] = {}
@@ -1550,8 +1551,26 @@ async def stats_cmd(interaction: discord.Interaction):
             f'**URL:** {truncate(dm.current_source["url"], 60)}\n\n'
             f'**By Category:**'
         )
-        for cat, cnt in sorted(categories.items(), key=lambda x: -x[1]):
+        
+        sorted_cats = sorted(categories.items(), key=lambda x: -x[1])
+        
+        # Add top categories as individual fields (up to MAX_FIELDS)
+        for i, (cat, cnt) in enumerate(sorted_cats[:MAX_FIELDS]):
             embed.add_field(name=cat, value=f'**{cnt}**', inline=True)
+        
+        # Bundle remaining categories into a single "Other" field
+        if len(sorted_cats) > MAX_FIELDS:
+            other_lines = []
+            other_total = 0
+            for cat, cnt in sorted_cats[MAX_FIELDS:]:
+                other_lines.append(f'{cat}: {cnt}')
+                other_total += cnt
+            other_text = '\n'.join(other_lines)
+            # Truncate if too long
+            if len(other_text) > CFG.embed_field_value_max:
+                other_text = other_text[:CFG.embed_field_value_max - 1] + '…'
+            safe_add_field(embed, name=f'Other ({len(sorted_cats) - MAX_FIELDS})',
+                           value=other_text, inline=False)
         
         embed.set_footer(text=f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")} | '
                                f'Source: {dm.current_source["name"]}')
@@ -1570,10 +1589,26 @@ async def stats_cmd(interaction: discord.Interaction):
             f'**Path:** {truncate(dm.current_source["url"], 60)}\n\n'
             f'**By Magazine Code:**'
         )
-        for mag, cnt in sorted(magazines.items(), key=lambda x: -x[1]):
+        
+        sorted_mags = sorted(magazines.items(), key=lambda x: -x[1])
+        
+        # Add top magazines as individual fields (up to MAX_FIELDS)
+        for i, (mag, cnt) in enumerate(sorted_mags[:MAX_FIELDS]):
             embed.add_field(name=mag, value=f'**{cnt}**', inline=True)
         
-        # FIXED: Proper indentation - moved outside the if block
+        # Bundle remaining into "Other"
+        if len(sorted_mags) > MAX_FIELDS:
+            other_lines = []
+            other_total = 0
+            for mag, cnt in sorted_mags[MAX_FIELDS:]:
+                other_lines.append(f'{mag}: {cnt}')
+                other_total += cnt
+            other_text = '\n'.join(other_lines)
+            if len(other_text) > CFG.embed_field_value_max:
+                other_text = other_text[:CFG.embed_field_value_max - 1] + '…'
+            safe_add_field(embed, name=f'Other ({len(sorted_mags) - MAX_FIELDS})',
+                           value=other_text, inline=False)
+        
         has_1979 = sum(1 for e in dm.episodes if e.get('1979 anime', '').strip())
         has_2005 = sum(1 for e in dm.episodes if e.get('2005 anime', '').strip())
         has_movie = sum(1 for e in dm.episodes if e.get('Movie', '').strip())
@@ -1606,15 +1641,33 @@ async def stats_cmd(interaction: discord.Interaction):
             f'**JP Special Stories:** {jp_specials}\n'
             f'**JP Standalone Specials:** {jp_standalone}\n\n'
             f'**Source:** {dm.current_source["name"]} ({dm.current_source["type"].title()})\n'
-            f'**URL:** {dm.current_source["name"]}\n\n'
+            f'**URL:** {dm.current_source["url"]}\n\n'
             f'**Breakdown:**'
         )
-        for cat, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+        
+        sorted_counts = sorted(counts.items(), key=lambda x: -x[1])
+        
+        # Add top categories as individual fields (up to MAX_FIELDS)
+        for i, (cat, cnt) in enumerate(sorted_counts[:MAX_FIELDS]):
             embed.add_field(name=cat.replace('_', ' ').title(), value=f'**{cnt}**', inline=True)
+        
+        # Bundle remaining into "Other"
+        if len(sorted_counts) > MAX_FIELDS:
+            other_lines = []
+            other_total = 0
+            for cat, cnt in sorted_counts[MAX_FIELDS:]:
+                other_lines.append(f'{cat.replace("_", " ").title()}: {cnt}')
+                other_total += cnt
+            other_text = '\n'.join(other_lines)
+            if len(other_text) > CFG.embed_field_value_max:
+                other_text = other_text[:CFG.embed_field_value_max - 1] + '…'
+            safe_add_field(embed, name=f'Other ({len(sorted_counts) - MAX_FIELDS})',
+                           value=other_text, inline=False)
 
     embed.set_footer(text=f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")} | '
                            f'Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
+
 
 # ============================================
 # HELP COMMAND
