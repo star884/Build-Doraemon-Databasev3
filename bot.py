@@ -970,7 +970,7 @@ class DatabaseManager:
                 self.char_data_loaded = False
                 return False
 
-        def convert_csv_to_episode_format(self, stories: List[dict]) -> List[dict]:
+    def convert_csv_to_episode_format(self, stories: List[dict]) -> List[dict]:
         """Map CSV data to standard EPISODES format (backwards-compatible)."""
         episodes: List[dict] = []
         for story in stories:
@@ -1123,9 +1123,7 @@ class DatabaseManager:
             return False, embed
         return True, None
 
-
 dm = DatabaseManager()
-
 
 # ============================================
 # EMBED HELPER FUNCTIONS
@@ -1137,7 +1135,6 @@ def truncate(text: str, max_len: int) -> str:
         return text[:max_len - 1] + '…'
     return text or ZERO_WIDTH_SPACE
 
-
 def safe_add_field(embed: Embed, *, name: str, value: str = '', inline: bool = False) -> None:
     """Add a field to an embed, enforcing Discord limits and preventing empty values."""
     name = truncate(name or ZERO_WIDTH_SPACE, CFG.embed_field_name_max)
@@ -1146,7 +1143,6 @@ def safe_add_field(embed: Embed, *, name: str, value: str = '', inline: bool = F
     if len(embed.fields) >= CFG.embed_field_max_count:
         return
     embed.add_field(name=name, value=value, inline=inline)
-
 
 def build_csv_result_fields(embed: Embed, story: dict) -> None:
     """Populate an embed with standard CSV story fields."""
@@ -1181,7 +1177,6 @@ def build_csv_result_fields(embed: Embed, story: dict) -> None:
     if extras:
         safe_add_field(embed, name='Additional Info', value='\n'.join(extras), inline=False)
 
-
 def build_more_matches_field(embed: Embed, results: List[dict], is_csv: bool, max_shown: int = 5) -> None:
     """Add a 'More Matches' field listing additional results."""
     count = min(len(results) - 1, max_shown)
@@ -1204,7 +1199,6 @@ def build_more_matches_field(embed: Embed, results: List[dict], is_csv: bool, ma
 
     safe_add_field(embed, name=f'More Matches ({len(results) - 1})', value='\n'.join(lines), inline=False)
 
-
 def build_char_more_matches_field(embed: Embed, results: List[dict], max_shown: int = 5) -> None:
     """Add a 'More Matches' field specifically for character results."""
     count = min(len(results) - 1, max_shown)
@@ -1218,7 +1212,6 @@ def build_char_more_matches_field(embed: Embed, results: List[dict], max_shown: 
         lines.append(f'- {name} [{cat}]')
 
     safe_add_field(embed, name=f'More Matches ({len(results) - 1})', value='\n'.join(lines), inline=False)
-
 
 # ============================================
 # BOT SETUP
@@ -1241,7 +1234,6 @@ if os.getenv('GITHUB_ACTIONS') == 'true':
     exit(0)
 
 bot = commands.Bot(command_prefix='!', intents=Intents.default())
-
 
 # ============================================
 # SOURCE MANAGEMENT COMMANDS
@@ -1271,7 +1263,6 @@ async def source_cmd(interaction: discord.Interaction):
     embed.set_footer(text=f'Source ID: {dm.current_source["id"]} | Switch with /source_change <id>')
     await interaction.response.send_message(embed=embed)
 
-
 @bot.tree.command(name='source_all', description='Lists all available database sources')
 @rate_limited('source_all')
 async def source_all_cmd(interaction: discord.Interaction):
@@ -1291,7 +1282,6 @@ async def source_all_cmd(interaction: discord.Interaction):
     safe_add_field(embed, name='How to switch',
                    value='Use `/source_change <number>` to switch\nExample: `/source_change 2`', inline=False)
     await interaction.response.send_message(embed=embed)
-
 
 @bot.tree.command(name='source_status', description='Shows detailed status of all database sources')
 @rate_limited('source_status')
@@ -1326,7 +1316,6 @@ async def source_status_cmd(interaction: discord.Interaction):
                    inline=False)
 
     await interaction.response.send_message(embed=embed)
-
 
 @bot.tree.command(name='source_change', description='Changes the active database source')
 @app_commands.describe(source_id='Source number to switch to (1=JSON, 2=CSV, 3=Remote Chars, 4=Local Chars)')
@@ -1408,7 +1397,6 @@ async def source_change_cmd(interaction: discord.Interaction, source_id: int):
                       description='An error occurred while switching sources.',
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 # ============================================
 # SEARCH COMMAND
@@ -1635,7 +1623,6 @@ async def search_cmd(interaction: discord.Interaction, query: str):
     embed.set_footer(text=footer)
     await interaction.response.send_message(embed=embed)
 
-
 # ============================================
 # JP LOOKUP COMMAND
 # ============================================
@@ -1719,7 +1706,6 @@ async def jp_cmd(interaction: discord.Interaction, jp_number: str):
         build_more_matches_field(embed, results, is_csv=False)
 
     await interaction.response.send_message(embed=embed)
-
 
 # ============================================
 # LIST COMMAND
@@ -1832,7 +1818,6 @@ async def list_cmd(interaction: discord.Interaction, page: int = 1, filter_val: 
 
     embed.set_footer(text=f'Page {page} of {total_pages} | Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
-
 
 # ============================================
 # STATS COMMAND
@@ -1955,7 +1940,6 @@ async def stats_cmd(interaction: discord.Interaction):
                            f'Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
 
-
 # ============================================
 # HELP COMMAND
 # ============================================
@@ -2029,7 +2013,6 @@ async def help_cmd(interaction: discord.Interaction):
     embed.set_footer(text='Doraemon Search Bot')
     await interaction.response.send_message(embed=embed)
 
-
 # ============================================
 # CSV-SPECIFIC COMMANDS
 # ============================================
@@ -2074,7 +2057,6 @@ async def search_jp_title_cmd(interaction: discord.Interaction, query: str):
 
     await interaction.response.send_message(embed=embed)
 
-
 @bot.tree.command(name='search_magazine', description='Search by magazine code (CSV only)')
 @app_commands.describe(code='Magazine code (e.g., YK, KG, G1, G2, G3, G4, G5, G6, BK, SD, TK, CC, CD)')
 @rate_limited('search_magazine')
@@ -2108,7 +2090,6 @@ async def search_magazine_cmd(interaction: discord.Interaction, code: str):
         embed.set_footer(text=f'Source: {dm.current_source["name"]}')
 
     await interaction.response.send_message(embed=embed)
-
 
 @bot.tree.command(name='search_1979', description='Search by 1979 anime episode (CSV only)')
 @app_commands.describe(episode='Episode text (e.g., 7, Ep 7, 403, Special)')
@@ -2145,7 +2126,6 @@ async def search_1979_cmd(interaction: discord.Interaction, episode: str):
 
     await interaction.response.send_message(embed=embed)
 
-
 @bot.tree.command(name='search_2005', description='Search by 2005 anime episode (CSV only)')
 @app_commands.describe(episode='Episode text (e.g., 16A, 44, 87, 1694)')
 @rate_limited('search_2005')
@@ -2180,7 +2160,6 @@ async def search_2005_cmd(interaction: discord.Interaction, episode: str):
         embed.set_footer(text=f'Source: {dm.current_source["name"]}')
 
     await interaction.response.send_message(embed=embed)
-
 
 @bot.tree.command(name='search_volume', description='Search by volume number across all compilation types (CSV only)')
 @app_commands.describe(
@@ -2294,7 +2273,6 @@ async def search_volume_cmd(
 
     await interaction.response.send_message(embed=embed)
 
-
 # ============================================
 # CHARACTER-SPECIFIC COMMANDS
 # ============================================
@@ -2357,7 +2335,6 @@ async def character_cmd(interaction: discord.Interaction, name: str):
     embed.set_footer(text=f'Matches: {len(results)} | Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
 
-
 @bot.tree.command(name='characters_by_category', description='List characters filtered by category (Characters source only)')
 @app_commands.describe(category='Category name (e.g., human, robot, animal)')
 @rate_limited('characters_by_category')
@@ -2409,7 +2386,6 @@ async def characters_by_category_cmd(interaction: discord.Interaction, category:
 
     await interaction.response.send_message(embed=embed)
 
-
 # ============================================
 # ERROR HANDLING
 # ============================================
@@ -2437,7 +2413,6 @@ async def on_app_command_error(
     except Exception as e:
         logger.error(f'Failed to send error message: {e}')
 
-
 @bot.event
 async def on_command_error(ctx, error):
     """Handle legacy prefix command errors."""
@@ -2453,7 +2428,6 @@ async def on_command_error(ctx, error):
             await ctx.send('An unexpected error occurred. Please contact the bot administrator.')
         except Exception:
             pass
-
 
 # ============================================
 # EVENT HANDLERS
