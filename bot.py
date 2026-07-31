@@ -970,7 +970,7 @@ class DatabaseManager:
                 self.char_data_loaded = False
                 return False
 
-        def convert_csv_to_episode_format(self, stories: List[dict]) -> List[dict]:
+       def convert_csv_to_episode_format(self, stories: List[dict]) -> List[dict]:
         """Map CSV data to standard EPISODES format (backwards-compatible)."""
         episodes: List[dict] = []
         for story in stories:
@@ -1012,7 +1012,6 @@ class DatabaseManager:
             }
             episodes.append(ep)
         return episodes
-
     async def load_csv_database(self, source_config: Dict[str, Any]) -> bool:
         """Unified loader supporting both local and remote CSV."""
         fetch_method = source_config.get('fetch_method', 'github_api')
