@@ -53,6 +53,20 @@ except ImportError:
 
 
 # ============================================
+# HELPER FUNCTIONS FOR CONFIG
+# ============================================
+
+def hex_to_int(hex_str: str) -> int:
+    """Convert a hex color string (with or without 0x prefix) to integer."""
+    if hex_str.startswith('0x') or hex_str.startswith('0X'):
+        return int(hex_str, 16)
+    try:
+        return int(hex_str, 16)
+    except ValueError:
+        return int(hex_str)  # Assume decimal if not hex
+
+
+# ============================================
 # CONFIGURATION MANAGEMENT
 # ============================================
 
@@ -75,10 +89,10 @@ class BotConfig:
     retry_backoff_base: int = int(os.getenv('RETRY_BACKOFF', '2'))
     
     # Embed limits (Discord constraints)
-    color_primary: int = int(os.getenv('COLOR_PRIMARY', '0x6d4aff'))
-    color_error: int = int(os.getenv('COLOR_ERROR', '0xcc0000'))
-    color_warning: int = int(os.getenv('COLOR_WARNING', '0xffaa00'))
-    color_success: int = int(os.getenv('COLOR_SUCCESS', '0x00cc00'))
+    color_primary: int = hex_to_int(os.getenv('COLOR_PRIMARY', '0x6d4aff'))
+    color_error: int = hex_to_int(os.getenv('COLOR_ERROR', '0xcc0000'))
+    color_warning: int = hex_to_int(os.getenv('COLOR_WARNING', '0xffaa00'))
+    color_success: int = hex_to_int(os.getenv('COLOR_SUCCESS', '0x00cc00'))
     
     embed_field_name_max: int = int(os.getenv('EMBED_FIELD_NAME_MAX', '256'))
     embed_field_value_max: int = int(os.getenv('EMBED_FIELD_VALUE_MAX', '1024'))
@@ -1382,7 +1396,7 @@ class ListNavigationView(ui.View):
     
     def __init__(self, data: List[dict], page: int, page_size: int, 
                  source_type: str, filter_val: Optional[str], dm_ref, 
-                 channel_id: int, message_id: int):
+                 channel_id: int, message_id: Optional[int]):
         super().__init__(timeout=None)  # Persistent buttons
         self.data = data
         self.page = page
@@ -1636,7 +1650,7 @@ async def source_change_cmd(interaction: discord.Interaction, source_id: int):
                         '- No internet connection (for online mode)\n\n'
                         f'Current source: **{dm.current_source["name"]}**\n\n'
                         '**Fix:** Clone the repo:\n'
-                        '```\ngit clone https://github.com/star884/Doraemon-CSV-DB.git ~/Doraemon-CSV-DB\n```'
+                        '```\ngit clone https://github.com/star884/Doraemon-CSV-DB\n```'
                     ),
                     color=CFG.color_warning
                 )
@@ -2061,7 +2075,7 @@ async def list_cmd(interaction: discord.Interaction, filter_val: Optional[str] =
         source_type=dm.current_source['type'],
         filter_val=filter_val,
         dm_ref=dm,
-        channel_id=interaction.channel_id,
+        channel_id=interaction.channel.id if hasattr(interaction.channel, 'id') else 0,
         message_id=None
     )
     
