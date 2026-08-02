@@ -2019,9 +2019,12 @@ async def jp_cmd(interaction: discord.Interaction, jp_number: str):
 # ============================================
 
 @bot.tree.command(name='list', description='List episodes or characters with pagination')
-@app_commands.describe(filter_val='Filter by magazine code (CSV), category (Chars), or season (JSON)')
+@app_commands.describe(
+    filter_val='Filter by magazine code (CSV), category (Chars), or season (JSON)',
+    page='Page number to jump to (default: 1)'
+)
 @rate_limited('list')
-async def list_cmd(interaction: discord.Interaction, filter_val: Optional[str] = None):
+async def list_cmd(interaction: discord.Interaction, filter_val: Optional[str] = None, page: Optional[int] = 1):
     if not dm.episodes and not dm.char_data:
         embed = Embed(title='Database Empty', description='No data loaded. Use `/source_change` to switch sources.', color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
@@ -2066,12 +2069,18 @@ async def list_cmd(interaction: discord.Interaction, filter_val: Optional[str] =
         await interaction.response.send_message(embed=embed)
         return
     
+    # Validate page number
     page_size = CFG.page_size
     total_pages = max(1, (len(filtered) + page_size - 1) // page_size)
     
+    if page < 1:
+        page = 1
+    elif page > total_pages:
+        page = total_pages
+    
     view = ListNavigationView(
         data=filtered,
-        page=1,
+        page=page,
         page_size=page_size,
         source_type=dm.current_source['type'],
         filter_val=filter_val,
@@ -2080,16 +2089,16 @@ async def list_cmd(interaction: discord.Interaction, filter_val: Optional[str] =
         message_id=None
     )
     
-    # Build initial embed for page 1
+    # Build initial embed for selected page
     start, end, chunk = view._get_page_data()
     filter_display = filter_val if filter_val else 'All'
     
     if char_mode:
-        title = f'Characters - Page 1 of {total_pages} ({filter_display})'
+        title = f'Characters - Page {page} of {total_pages} ({filter_display})'
     elif csv_mode:
-        title = f'Manga Stories - Page 1 of {total_pages} ({filter_display})'
+        title = f'Manga Stories - Page {page} of {total_pages} ({filter_display})'
     else:
-        title = f'Doraemon Episodes - Page 1 of {total_pages} ({filter_display})'
+        title = f'Doraemon Episodes - Page {page} of {total_pages} ({filter_display})'
     
     embed = Embed(title=title, color=CFG.color_primary)
     embed.description = f'Total: **{len(filtered)}** | Showing {start + 1}-{end}'
@@ -2128,7 +2137,7 @@ async def list_cmd(interaction: discord.Interaction, filter_val: Optional[str] =
                 title_display += f' / {truncate(story_b, 40)}'
             safe_add_field(embed, name=f'{in_ep} | JP: {jp_st}', value=title_display, inline=False)
     
-    embed.set_footer(text=f'Page 1 of {total_pages} | Source: {dm.current_source["name"]}')
+    embed.set_footer(text=f'Page {page} of {total_pages} | Source: {dm.current_source["name"]}')
     metrics.record_command('list')
     
     await interaction.response.send_message(embed=embed, view=view)
