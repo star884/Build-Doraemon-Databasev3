@@ -1398,7 +1398,7 @@ class ListNavigationView(ui.View):
     def __init__(self, data: List[dict], page: int, page_size: int, 
                  source_type: str, filter_val: Optional[str], dm_ref, 
                  channel_id: int, message_id: Optional[int]):
-        super().__init__(timeout=None)  # Persistent buttons
+        super().__init__(timeout=180)  # 3 minutes - more reliable
         self.data = data
         self.page = page
         self.page_size = page_size
