@@ -1392,13 +1392,14 @@ def build_char_more_matches_field(embed: Embed, results: List[dict], max_shown: 
 # PAGINATION VIEW WITH BUTTONS
 # ============================================
 
+
 class ListNavigationView(ui.View):
     """Interactive pagination view for list command with Prev/Next/First/Last buttons."""
     
     def __init__(self, data: List[dict], page: int, page_size: int, 
                  source_type: str, filter_val: Optional[str], dm_ref, 
                  channel_id: int, message_id: Optional[int]):
-        super().__init__(timeout=180)  # 3 minutes - more reliable
+        super().__init__(timeout=180)
         self.data = data
         self.page = page
         self.page_size = page_size
@@ -1418,18 +1419,15 @@ class ListNavigationView(ui.View):
         self.last_button.disabled = page >= self.total_pages
     
     async def on_timeout(self) -> None:
-        """Called when view times out - keep buttons functional with timeout=None."""
         pass
     
     def _get_page_data(self) -> Tuple[int, int, List[dict]]:
-        """Calculate page range and return (start, end, chunk)."""
         start = (self.page - 1) * self.page_size
         end = min(start + self.page_size, len(self.data))
         chunk = self.data[start:end]
         return start, end, chunk
     
     def _build_embed(self) -> Embed:
-        """Build the embed for current page."""
         start, end, chunk = self._get_page_data()
         filter_display = self.filter_val if self.filter_val else 'All'
         
@@ -1469,7 +1467,7 @@ class ListNavigationView(ui.View):
                     field_value += f' | 2005: {anime_2005}'
                 safe_add_field(embed, name=field_name, value=field_value, inline=False)
             
-            else:  # JSON mode
+            else:
                 in_ep = r.get('in_season_episode', 'N/A')
                 jp_st = r.get('jp_story_all', '-') or '-'
                 story_a = r.get('story_a', 'Unknown')[:40]
@@ -1485,7 +1483,11 @@ class ListNavigationView(ui.View):
         return embed
     
     async def update_message(self, interaction: Interaction) -> None:
-        """Update the message with current page data."""
+        self.prev_button.disabled = self.page <= 1
+        self.first_button.disabled = self.page <= 1
+        self.next_button.disabled = self.page >= self.total_pages
+        self.last_button.disabled = self.page >= self.total_pages
+        
         embed = self._build_embed()
         await interaction.response.edit_message(embed=embed, view=self)
         metrics.record_command('list_page_navigation')
@@ -1513,7 +1515,6 @@ class ListNavigationView(ui.View):
         if self.page < self.total_pages:
             self.page = self.total_pages
             await self.update_message(interaction)
-
 
 # ============================================
 # BOT SETUP
