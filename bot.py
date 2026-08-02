@@ -38,7 +38,7 @@ from typing import Optional, Tuple, List, Dict, Any, Callable, Set
 from enum import Enum
 
 import discord
-from discord import app_commands, Embed, Intents, ui, Interaction, ButtonStyle, View
+from discord import app_commands, Embed, Intents, ui, Interaction, ButtonStyle
 from discord.ext import commands
 from dotenv import load_dotenv
 
