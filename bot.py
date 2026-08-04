@@ -2579,8 +2579,7 @@ async def health_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name='search', description='Search by title, episode, magazine code, or character name')
 @app_commands.describe(query='Search term (e.g., nobita, Ep 7, YK, 1970-01)')
-@app_commands.autocomplete(query=autocomplete_search))
-@rate_limited('search')
+@app_commands.autocomplete(query=autocomplete_search)@rate_limited('search')
 async def search_cmd(interaction: discord.Interaction, query: str):
     coro_id = generate_correlation_id()
     q_raw = sanitize_query(query, CFG.max_query_length)
@@ -2789,9 +2788,25 @@ async def search_cmd(interaction: discord.Interaction, query: str):
         if len(results) > 1:
             build_more_matches_field(embed, results, is_csv=False)
 
-# Check if there are multiple results if len(results) > 1: source_type_val = dm.current_source['type'] # Add the text "More Matches" field (keep for visibility) if char_mode: build_char_more_matches_field(embed, results) elif csv_mode: build_more_matches_field(embed, results, csv_mode) else: build_more_matches_field(embed, results, is_csv=False) # Attach the dropdown for interactive browsing view = ResultSelectView(results[:25], source_type_val) footer = f'Matches: {len(results)} | Source: {dm.current_source["name"]}' if cache_hit: footer += ' [Cached]' footer += ' | Use dropdown to view details' embed.set_footer(text=footer) await interaction.response.send_message(embed=embed, view=view) return # Single result case footer = f'Matches: {len(results)} | Source: {dm.current_source["name"]}' if cache_hit: footer += ' [Cached]' embed.set_footer(text=footer) await interaction.response.send_message(embed=embed)
+    # --- Send the embed with dropdown if multiple results ---
+    source_type_val = dm.current_source['type']
 
+    if len(results) > 1:
+        view = ResultSelectView(results[:25], source_type_val)
+        footer = f'Matches: {len(results)} | Source: {dm.current_source["name"]}'
+        if cache_hit:
+            footer += ' [Cached]'
+        footer += ' | Use dropdown to view details'
+        embed.set_footer(text=footer)
+        await interaction.response.send_message(embed=embed, view=view)
+        return
 
+    # Single result case
+    footer = f'Matches: {len(results)} | Source: {dm.current_source["name"]}'
+    if cache_hit:
+        footer += ' [Cached]'
+    embed.set_footer(text=footer)
+    await interaction.response.send_message(embed=embed)
 
 
 # ============================================
