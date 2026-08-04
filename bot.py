@@ -2282,6 +2282,43 @@ async def autocomplete_categories(
 
 
 # ============================================
+# NEW: MODE-AWARE SEARCH AUTOCOMPLETE
+# ============================================
+
+async def autocomplete_search(
+    interaction: discord.Interaction,
+    current: str
+) -> List[app_commands.Choice[str]]:
+    """Mode-aware autocomplete for /search."""
+    q = current.lower().strip()
+   
+    if dm.is_char_source() and dm.char_data_loaded:
+        names = [
+            c.get('Character Name', '')
+            for c in dm.char_data
+            if q in c.get('Character Name', '').lower()
+        ][:25]
+        return [app_commands.Choice(name=n, value=n) for n in names if n]
+   
+    elif dm.is_csv_source() and dm.csv_data_loaded:
+        titles = [
+            s.get('English title', '') or s.get('Japanese title', '')
+            for s in dm.csv_stories
+            if q in (s.get('English title', '') or s.get('Japanese title', '')).lower()
+        ][:25]
+        return [app_commands.Choice(name=t, value=t) for t in titles if t]
+   
+    elif dm.episodes:
+        titles = [
+            ep.get('story_a', '') or ep.get('title', '')
+            for ep in dm.episodes
+            if q in (ep.get('story_a', '') or ep.get('title', '')).lower()
+        ][:25]
+        return [app_commands.Choice(name=t, value=t) for t in titles if t]
+   
+    return []
+
+# ============================================
 # SOURCE MANAGEMENT COMMANDS
 # ============================================
 
@@ -2542,7 +2579,7 @@ async def health_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name='search', description='Search by title, episode, magazine code, or character name')
 @app_commands.describe(query='Search term (e.g., nobita, Ep 7, YK, 1970-01)')
-@app_commands.autocomplete(query=autocomplete_character_names)
+@app_commands.autocomplete(query=autocomplete_search))
 @rate_limited('search')
 async def search_cmd(interaction: discord.Interaction, query: str):
     coro_id = generate_correlation_id()
@@ -2752,11 +2789,9 @@ async def search_cmd(interaction: discord.Interaction, query: str):
         if len(results) > 1:
             build_more_matches_field(embed, results, is_csv=False)
 
-    footer = f'Matches: {len(results)} | Source: {dm.current_source["name"]}'
-    if cache_hit:
-        footer += ' [Cached]'
-    embed.set_footer(text=footer)
-    await interaction.response.send_message(embed=embed)
+# Check if there are multiple results if len(results) > 1: source_type_val = dm.current_source['type'] # Add the text "More Matches" field (keep for visibility) if char_mode: build_char_more_matches_field(embed, results) elif csv_mode: build_more_matches_field(embed, results, csv_mode) else: build_more_matches_field(embed, results, is_csv=False) # Attach the dropdown for interactive browsing view = ResultSelectView(results[:25], source_type_val) footer = f'Matches: {len(results)} | Source: {dm.current_source["name"]}' if cache_hit: footer += ' [Cached]' footer += ' | Use dropdown to view details' embed.set_footer(text=footer) await interaction.response.send_message(embed=embed, view=view) return # Single result case footer = f'Matches: {len(results)} | Source: {dm.current_source["name"]}' if cache_hit: footer += ' [Cached]' embed.set_footer(text=footer) await interaction.response.send_message(embed=embed)
+
+
 
 
 # ============================================
