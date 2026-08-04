@@ -224,17 +224,7 @@ def is_admin(interaction: discord.Interaction) -> bool:
 @dataclass
 class BotConfig:
     """Central configuration loaded from environment or defaults."""
-    __slots__ = (
-        'page_size', 'max_pages', 'search_cache_ttl', 'cache_max_size',
-        'rate_per_user', 'rate_per_guild', 'rate_window_seconds',
-        'http_timeout_seconds', 'max_retries', 'retry_backoff_base',
-        'color_primary', 'color_error', 'color_warning', 'color_success',
-        'embed_field_name_max', 'embed_field_value_max', 'embed_total_max',
-        'embed_field_max_count', 'max_search_results', 'max_query_length',
-        'fuzzy_threshold', 'log_level', 'log_file', 'log_rotation_mb',
-        'log_rotation_days', 'home_dir', 'log_json',
-    )
-
+    
     page_size: int = int(os.getenv('PAGE_SIZE', str(DEFAULT_PAGE_SIZE)))
     max_pages: int = int(os.getenv('MAX_PAGES', '999'))
     search_cache_ttl: int = int(os.getenv('CACHE_TTL', '300'))
@@ -4098,3 +4088,4 @@ if __name__ == '__main__':
         logger.critical(f'Fatal error starting bot: {type(e).__name__}: {e}')
         logger.error('Check your DISCORD_TOKEN and permissions.')
         sys.exit(1)
+
