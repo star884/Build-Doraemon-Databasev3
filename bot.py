@@ -2579,7 +2579,8 @@ async def health_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name='search', description='Search by title, episode, magazine code, or character name')
 @app_commands.describe(query='Search term (e.g., nobita, Ep 7, YK, 1970-01)')
-@app_commands.autocomplete(query=autocomplete_search)@rate_limited('search')
+@app_commands.autocomplete(query=autocomplete_search)
+@rate_limited('search')
 async def search_cmd(interaction: discord.Interaction, query: str):
     coro_id = generate_correlation_id()
     q_raw = sanitize_query(query, CFG.max_query_length)
