@@ -1314,7 +1314,7 @@ class DatabaseManager:
         skipped_no_name = 0
         separate_same_name_diff_desc = 0
 
-        for entry i        n raw_entries:
+        for entry in raw_entries:
             name = entry.get('Character Name', '').strip()
             desc = entry.get('Description', '').strip()
             alt = entry.get('Alternative Name', '').strip()
