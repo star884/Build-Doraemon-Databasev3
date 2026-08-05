@@ -1717,7 +1717,7 @@ class DatabaseManager:
 
         return False
 
-               async def load_char_database(self, source_config: Dict[str, Any]) -> bool:
+    async def load_char_database(self, source_config: Dict[str, Any]) -> bool:
         """Load character database (local or remote) with proper assignment."""
         fetch_method = source_config.get('fetch_method', 'github_raw')
         source_url = source_config['url']
