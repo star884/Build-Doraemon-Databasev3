@@ -1717,8 +1717,7 @@ class DatabaseManager:
 
         return False
 
-       async def load_char_database(self, source_config: Dict[str, Any]) -> bool:
-        """Load character database (local or remote) with proper assignment."""
+               async def load_char_database(self, source_config: Dict[str, Any]) -> bool:        """Load character database (local or remote) with proper assignment."""
         fetch_method = source_config.get('fetch_method', 'github_raw')
         source_url = source_config['url']
 
@@ -4311,3 +4310,4 @@ if __name__ == '__main__':
         logger.critical(f'Fatal error starting bot: {type(e).__name__}: {e}')
         logger.error('Check your DISCORD_TOKEN and permissions.')
         sys.exit(1)
+
