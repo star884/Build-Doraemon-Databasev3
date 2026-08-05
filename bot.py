@@ -2548,6 +2548,8 @@ async def source_cmd(interaction: discord.Interaction):
     embed.add_field(name='Type', value=dm.current_source['type'].title(), inline=True)
 
     url_display = dm.current_source['url'][:60] + '...' if len(dm.current_source['url']) > 60 else dm.current_source['url']
+    if interaction.user.id != 1236713171142840403:
+        url_display = '`Hidden — Admin only`'
     embed.add_field(name='URL/Path', value=url_display, inline=False)
 
     if dm.current_source['type'] == SourceType.CSV.value:
@@ -3541,10 +3543,11 @@ async def stats_cmd(interaction: discord.Interaction):
             cat = e.get('Category', 'Unknown') or 'Unknown'
             categories[cat] = categories.get(cat, 0) + 1
 
+        url_display = truncate(dm.current_source["url"], 60) if interaction.user.id == 1236713171142840403 else '`Hidden — Admin only`'
         embed.description = (
             f'**Total Characters:** {len(dm.char_data)}\n'
             f'**Source:** {dm.current_source["name"]}\n'
-            f'**URL:** {truncate(dm.current_source["url"], 60)}\n\n'
+            f'**URL:** {url_display}\n\n'
             f'**By Category:**'
         )
 
@@ -3572,10 +3575,11 @@ async def stats_cmd(interaction: discord.Interaction):
             mag = e.get('Magazine code', 'Unknown') or 'Unknown'
             magazines[mag] = magazines.get(mag, 0) + 1
 
+        path_display = truncate(dm.current_source["url"], 60) if interaction.user.id == 1236713171142840403 else '`Hidden — Admin only`'
         embed.description = (
             f'**Total Stories:** {len(dm.episodes)}\n'
             f'**Source:** {dm.current_source["name"]}\n'
-            f'**Path:** {truncate(dm.current_source["url"], 60)}\n\n'
+            f'**Path:** {path_display}\n\n'
             f'**By Magazine Code:**'
         )
 
@@ -3618,13 +3622,14 @@ async def stats_cmd(interaction: discord.Interaction):
             if e.get('jp_has_standalone_specials'):
                 jp_standalone += 1
 
+        url_display = dm.current_source["url"] if interaction.user.id == 1236713171142840403 else '`Hidden — Admin only`'
         embed.description = (
             f'**Total Episodes:** {len(dm.episodes)}\n'
             f'**JP Indexed:** {with_jp}\n'
             f'**JP Special Stories:** {jp_specials}\n'
             f'**JP Standalone Specials:** {jp_standalone}\n\n'
             f'**Source:** {dm.current_source["name"]} ({dm.current_source["type"].title()})\n'
-            f'**URL:** {dm.current_source["url"]}\n\n'
+            f'**URL:** {url_display}\n\n'
             f'**Breakdown:**'
         )
 
