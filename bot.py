@@ -3075,17 +3075,10 @@ async def search_all_cmd(interaction: discord.Interaction, query: str):
                        value=preview, inline=False)
 
     embed.description = f'Found **{total}** total results across {len(results)} source(s)'
-    embed.set_footer(text=f'Use the dropdown below to browse all results | Source: All')
+    embed.set_footer(text=f'Use the dropdown(s) below to browse all results | Source: All')
 
-    # Add select menu
-    all_results: List[dict] = []
-    combined_source_type = SourceType.CSV_CHAR.value if 'characters' in results else (
-        SourceType.CSV.value if 'manga_stories' in results else 'json'
-    )
-    for sr in results.values():
-        all_results.extend(sr)
-
-    view = ResultSelectView(all_results[:25], combined_source_type)
+    
+    view = CrossSourceSelectView(results)
     await interaction.response.send_message(embed=embed, view=view)
 
 
@@ -4175,6 +4168,26 @@ async def auto_refresh_task():
 async def auto_refresh_before():
     """Wait until bot is ready before starting auto-refresh."""
     await bot.wait_until_ready()
+class CrossSourceSelectView(ui.View):
+    """View with multiple dropdown menus — one per source type."""
+
+    def __init__(self, results: Dict[str, List[dict]]):
+        super().__init__(timeout=CFG.view_timeout_seconds)
+
+        source_map: Dict[str, str] = {
+            'characters':    SourceType.CSV_CHAR.value,
+            'manga_stories': SourceType.CSV.value,
+            'episodes':      'json',
+        }
+
+        for source_name, source_results in results.items():
+            source_type = source_map.get(source_name, 'json')
+            menu = ResultSelectMenu(source_results[:25], source_type)
+
+            label_display = source_name.replace('_', ' ').title()
+            menu.placeholder = f'Browse {label_display} ({len(source_results)} match(es))...'
+
+            self.add_item(menu)
 
 # ============================================
 # ERROR HANDLING
