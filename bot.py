@@ -1379,6 +1379,7 @@ class DatabaseManager:
                 logger.warning('JSON loaded but contains NO records!')
                 logger.warning(f'JSON keys found: {list(self.db.keys())[:10]}')
             self.episodes_source = SourceType.JSON
+            return True
         except json.JSONDecodeError as e:
             self.episodes = []
             logger.error(f'Invalid JSON in database file: {e}')
