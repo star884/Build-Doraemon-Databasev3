@@ -209,6 +209,19 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Scoring constants for character search tiers
+SCORE_EXACT_NAME_BONUS = 50.0
+SCORE_WORD_BOUNDARY_NAME = 100.0
+SCORE_WORD_BOUNDARY_ALT = 80.0
+SCORE_SUBSTRING_NAME = 60.0
+SCORE_CATEGORY_MATCH = 40.0
+SCORE_DESC_BASE = 20.0
+SCORE_DESC_OVERLAY_WEIGHT = 10.0
+SCORE_FUZZY_NAME_BASE = 15.0
+SCORE_FUZZY_ALT_BASE = 12.0
+SCORE_FUZZY_WEIGHT = 5.0
+
+
 # ============================================
 # CONFIGURATION MANAGEMENT
 # ============================================
@@ -440,8 +453,8 @@ def validate_discord_token(token: str) -> bool:
     # Try base64-decoding the first segment to extract bot ID
     import base64
     try:
-        padded = parts[0] + '=' * (4 - len(parts[0]) % 4)
-        decoded = base64.b64decode(padded)
+        padded = parts[0] + '=' * (-len(parts[0]) % 4)
+        decoded = base64.b64decode(padded, validate=True)
         decoded.decode('ascii')  # Should be a numeric string (bot user ID)
     except Exception:
         return False
@@ -516,7 +529,7 @@ def levenshtein_ratio(s1: str, s2: str) -> float:
 
     len1, len2 = len(s1), len(s2)
 
-    if abs(len1 - len2) > max(len1, len2) * 0.5:
+    if abs(len1 - len2) > max(len1, len2) * 0.7:
         return 0.0
 
     prev_row = list(range(len2 + 1))
@@ -714,9 +727,10 @@ class SearchCache:
 
     v4.1: SQLite operations now protected by threading.Lock with
     check_same_thread=False. Transactions wrapped with try/except/rollback.
+    Persistent connection instead of creating/destroying connections per operation.
     """
 
-    __slots__ = ('_cache', '_meta', 'ttl', 'max_size', '_db_path', '_source_map', '_sqlite_lock')
+    __slots__ = ('_cache', '_meta', 'ttl', 'max_size', '_db_path', '_source_map', '_sqlite_lock', '_conn')
 
     def __init__(self, ttl: int = 300, max_size: int = 1000, db_path: str = CACHE_DB_FILENAME):
         self._cache: Dict[str, Tuple[List[dict], float]] = {}
@@ -725,7 +739,26 @@ class SearchCache:
         self.max_size = max_size
         self._db_path = db_path
         self._sqlite_lock = threading.Lock()
+        self._conn: Optional[sqlite3.Connection] = None
+        self._init_persistent_connection()
         self._load_from_db()
+
+    def _init_persistent_connection(self) -> None:
+        """Initialize a persistent SQLite connection for all cache operations."""
+        try:
+            self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+            self._conn.execute('''
+                CREATE TABLE IF NOT EXISTS search_cache (
+                    key TEXT PRIMARY KEY,
+                    source_type TEXT NOT NULL,
+                    results TEXT NOT NULL,
+                    timestamp REAL NOT NULL
+                )
+            ''')
+            self._conn.commit()
+        except Exception as e:
+            logging.getLogger('doraemon-bot').warning(f'Could not init SQLite cache connection: {e}')
+            self._conn = None
 
     def _key(self, source_type: str, query: str) -> str:
         """Plain-string key (no MD5 hashing needed)."""
@@ -773,93 +806,66 @@ class SearchCache:
         return len(self._cache)
 
     def _load_from_db(self) -> None:
-        """Load cached results from SQLite on startup.
-
-        v4.1: Uses check_same_thread=False and threading.Lock.
-        """
+        """Load cached results from SQLite on startup using persistent connection."""
+        if not self._conn:
+            return
         try:
-            if not os.path.exists(self._db_path):
-                return
             with self._sqlite_lock:
-                conn = sqlite3.connect(self._db_path, check_same_thread=False)
-                try:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        CREATE TABLE IF NOT EXISTS search_cache (
-                            key TEXT PRIMARY KEY,
-                            source_type TEXT NOT NULL,
-                            results TEXT NOT NULL,
-                            timestamp REAL NOT NULL
-                        )
-                    ''')
-                    now = time.time()
-                    cursor.execute('SELECT key, source_type, results, timestamp FROM search_cache')
-                    for key, source_type, results_json, ts in cursor.fetchall():
-                        if now - ts < self.ttl and len(self._cache) < self.max_size:
-                            results = json.loads(results_json)
-                            self._cache[key] = (results, ts)
-                            self._source_map[key] = source_type
-                        else:
-                            cursor.execute('DELETE FROM search_cache WHERE key = ?', (key,))
-                    conn.commit()
-                except Exception as e:
-                    conn.rollback()
-                    logging.getLogger('doraemon-bot').warning(f'SQLite cache load failed, rolling back: {e}')
-                finally:
-                    conn.close()
+                cursor = self._conn.cursor()
+                now = time.time()
+                cursor.execute('SELECT key, source_type, results, timestamp FROM search_cache')
+                for key, source_type, results_json, ts in cursor.fetchall():
+                    if now - ts < self.ttl and len(self._cache) < self.max_size:
+                        results = json.loads(results_json)
+                        self._cache[key] = (results, ts)
+                        self._source_map[key] = source_type
+                    else:
+                        cursor.execute('DELETE FROM search_cache WHERE key = ?', (key,))
+                self._conn.commit()
         except Exception as e:
-            logging.getLogger('doraemon-bot').warning(f'Could not load SQLite cache: {e}')
+            self._conn.rollback()
+            logging.getLogger('doraemon-bot').warning(f'SQLite cache load failed, rolling back: {e}')
 
     def _persist_entry(self, key: str, source_type: str, results: List[dict]) -> None:
-        """Persist a single cache entry to SQLite.
-
-        v4.1: Uses check_same_thread=False, threading.Lock, and
-        try/except/rollback for transaction safety.
-        """
+        """Persist a single cache entry to SQLite using persistent connection."""
+        if not self._conn:
+            return
         try:
             with self._sqlite_lock:
-                conn = sqlite3.connect(self._db_path, check_same_thread=False)
-                try:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        CREATE TABLE IF NOT EXISTS search_cache (
-                            key TEXT PRIMARY KEY,
-                            source_type TEXT NOT NULL,
-                            results TEXT NOT NULL,
-                            timestamp REAL NOT NULL
-                        )
-                    ''')
-                    cursor.execute(
-                        'INSERT OR REPLACE INTO search_cache (key, source_type, results, timestamp) VALUES (?, ?, ?, ?)',
-                        (key, source_type, json.dumps(results, ensure_ascii=False), time.time())
-                    )
-                    conn.commit()
-                except Exception as e:
-                    conn.rollback()
-                    logging.getLogger('doraemon-bot').debug(f'Could not persist cache entry (rolled back): {e}')
-                finally:
-                    conn.close()
+                self._conn.execute(
+                    'INSERT OR REPLACE INTO search_cache (key, source_type, results, timestamp) VALUES (?, ?, ?, ?)',
+                    (key, source_type, json.dumps(results, ensure_ascii=False), time.time())
+                )
+                self._conn.commit()
         except Exception as e:
-            logging.getLogger('doraemon-bot').debug(f'Could not persist cache entry: {e}')
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            logging.getLogger('doraemon-bot').debug(f'Could not persist cache entry (rolled back): {e}')
 
     def _clear_db(self) -> None:
-        """Clear the SQLite cache table.
-
-        v4.1: Uses threading.Lock and proper exception handling.
-        """
+        """Clear the SQLite cache table using persistent connection."""
+        if not self._conn:
+            return
         try:
-            if os.path.exists(self._db_path):
-                with self._sqlite_lock:
-                    conn = sqlite3.connect(self._db_path, check_same_thread=False)
-                    try:
-                        conn.execute('DELETE FROM search_cache')
-                        conn.commit()
-                    except Exception:
-                        conn.rollback()
-                    finally:
-                        conn.close()
+            with self._sqlite_lock:
+                self._conn.execute('DELETE FROM search_cache')
+                self._conn.commit()
         except Exception:
-            pass
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Close the persistent SQLite connection."""
+        if self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
 
 # ============================================
@@ -871,8 +877,10 @@ class SearchIndex:
 
     __slots__ = ('by_title_token', 'by_magazine', 'by_category',
                  'by_char_name_token', 'by_char_category', 'by_char_desc_token',
+                 'by_anime_1979', 'by_anime_2005',
                  '_data', '_char_data', '_char_index_built',
-                 '_magazine_buckets', '_date_buckets')
+                 '_magazine_buckets', '_date_buckets',
+                 '_anime_1979_buckets', '_anime_2005_buckets')
 
     def __init__(self):
         self.by_title_token: Dict[str, List[int]] = {}
@@ -881,61 +889,98 @@ class SearchIndex:
         self.by_char_name_token: Dict[str, List[int]] = {}
         self.by_char_category: Dict[str, List[int]] = {}
         self.by_char_desc_token: Dict[str, List[int]] = {}
+        self.by_anime_1979: Dict[str, List[int]] = {}
+        self.by_anime_2005: Dict[str, List[int]] = {}
         self._data: List[dict] = []
         self._char_data: List[dict] = []
         self._char_index_built: bool = False
         self._magazine_buckets: Dict[str, List[dict]] = {}
         self._date_buckets: Dict[str, List[dict]] = {}
+        self._anime_1979_buckets: Dict[str, List[dict]] = {}
+        self._anime_2005_buckets: Dict[str, List[dict]] = {}
 
     def build_story_index(self, data: List[dict]) -> None:
-        """Build inverted index for story data and precompute filter buckets."""
-        self._data = data
-        self.by_title_token.clear()
-        self.by_magazine.clear()
-        self._magazine_buckets.clear()
-        self._date_buckets.clear()
+        """Build inverted index for story data and precompute filter buckets.
+
+        Builds into temporary dicts then atomically swaps to avoid
+        race conditions with concurrent search reads.
+        """
+        new_title_token: Dict[str, List[int]] = {}
+        new_magazine: Dict[str, List[int]] = {}
+        new_mag_buckets: Dict[str, List[dict]] = {}
+        new_date_buckets: Dict[str, List[dict]] = {}
+        new_anime_1979: Dict[str, List[int]] = {}
+        new_anime_2005: Dict[str, List[int]] = {}
+        new_anime_1979_buckets: Dict[str, List[dict]] = {}
+        new_anime_2005_buckets: Dict[str, List[dict]] = {}
 
         for idx, item in enumerate(data):
             title = (item.get('English title', '') or item.get('story_a', '')).lower()
             for token in re.findall(r'\w+', title):
-                self.by_title_token.setdefault(token, []).append(idx)
-            mag = item.get('Magazine code', '')
+                new_title_token.setdefault(token, []).append(idx)
+            mag = (item.get('Magazine code', '') or '').upper().strip()
             if mag:
-                mag = mag.upper().strip()
-            if mag:
-                self.by_magazine.setdefault(mag, []).append(idx)
-                self._magazine_buckets.setdefault(mag, []).append(item)
-            date = item.get('Publication Date', '')
+                new_magazine.setdefault(mag, []).append(idx)
+                new_mag_buckets.setdefault(mag, []).append(item)
+            date = (item.get('Publication Date', '') or '').strip()
             if date:
-                date = date.strip()
-            if date:
-                self._date_buckets.setdefault(date, []).append(item)
+                new_date_buckets.setdefault(date, []).append(item)
+
+            # Build anime episode indices
+            anime_1979 = (item.get('1979 anime', '') or '').lower()
+            if anime_1979:
+                for ep_ref in re.findall(r'[a-z]*\d+[a-z]*', anime_1979):
+                    new_anime_1979.setdefault(ep_ref, []).append(idx)
+                new_anime_1979_buckets.setdefault(anime_1979, []).append(item)
+
+            anime_2005 = (item.get('2005 anime', '') or '').lower()
+            if anime_2005:
+                for ep_ref in re.findall(r'[a-z]*\d+[a-z]*', anime_2005):
+                    new_anime_2005.setdefault(ep_ref, []).append(idx)
+                new_anime_2005_buckets.setdefault(anime_2005, []).append(item)
+
+        # Atomic swap
+        self._data = data
+        self.by_title_token = new_title_token
+        self.by_magazine = new_magazine
+        self._magazine_buckets = new_mag_buckets
+        self._date_buckets = new_date_buckets
+        self.by_anime_1979 = new_anime_1979
+        self.by_anime_2005 = new_anime_2005
+        self._anime_1979_buckets = new_anime_1979_buckets
+        self._anime_2005_buckets = new_anime_2005_buckets
 
         logger.info(f'Built story index: {len(self.by_title_token)} title tokens, '
                      f'{len(self.by_magazine)} magazine codes, '
                      f'{len(self._magazine_buckets)} magazine buckets, '
-                     f'{len(self._date_buckets)} date buckets')
+                     f'{len(self._date_buckets)} date buckets, '
+                     f'{len(self.by_anime_1979)} 1979-anime refs, '
+                     f'{len(self.by_anime_2005)} 2005-anime refs')
 
     def build_char_index(self, data: List[dict]) -> None:
-        """Build inverted index for character data."""
-        self._char_data = data
-        self.by_char_name_token.clear()
-        self.by_char_category.clear()
-        self.by_char_desc_token.clear()
-        self._char_index_built = True
+        """Build inverted index for character data using atomic swap."""
+        new_name_token: Dict[str, List[int]] = {}
+        new_category: Dict[str, List[int]] = {}
+        new_desc_token: Dict[str, List[int]] = {}
 
         for idx, item in enumerate(data):
             for field_name in ('Character Name', 'Alternative Name'):
-                name = item.get(field_name, '') or ''
-                name = name.lower()
+                name = (item.get(field_name, '') or '').lower()
                 for token in re.findall(r'\w+', name):
-                    self.by_char_name_token.setdefault(token, []).append(idx)
+                    new_name_token.setdefault(token, []).append(idx)
             cat = (item.get('Category', '') or '').lower().strip()
             if cat:
-                self.by_char_category.setdefault(cat, []).append(idx)
+                new_category.setdefault(cat, []).append(idx)
             desc = (item.get('Description', '') or '').lower()
             for token in re.findall(r'\w+', desc):
-                self.by_char_desc_token.setdefault(token, []).append(idx)
+                new_desc_token.setdefault(token, []).append(idx)
+
+        # Atomic swap
+        self._char_data = data
+        self.by_char_name_token = new_name_token
+        self.by_char_category = new_category
+        self.by_char_desc_token = new_desc_token
+        self._char_index_built = True
 
         logger.info(f'Built character index: {len(self.by_char_name_token)} name tokens, '
                      f'{len(self.by_char_category)} categories, '
@@ -960,8 +1005,14 @@ class SearchIndex:
                 candidate_sets.append(set(self.by_title_token[token]))
             else:
                 # Fuzzy fallback: find closest index tokens
+                # Restrict to tokens within a plausible length range for performance
+                token_len = len(token)
+                min_len = max(1, int(token_len * 0.5))
+                max_len = int(token_len * 1.5) + 1
                 fuzzy_hits: Set[int] = set()
                 for idx_token, indices in self.by_title_token.items():
+                    if len(idx_token) < min_len or len(idx_token) > max_len:
+                        continue
                     if levenshtein_ratio(idx_token, token) >= CFG.fuzzy_threshold:
                         fuzzy_hits.update(indices)
                 if fuzzy_hits:
@@ -1003,6 +1054,14 @@ class SearchIndex:
         """Get pre-filtered stories for a publication date."""
         return self._date_buckets.get(date.strip(), [])
 
+    def get_anime_1979_bucket(self, ep_ref: str) -> List[dict]:
+        """Get pre-filtered stories for a 1979 anime episode reference."""
+        return self._anime_1979_buckets.get(ep_ref.lower().strip(), [])
+
+    def get_anime_2005_bucket(self, ep_ref: str) -> List[dict]:
+        """Get pre-filtered stories for a 2005 anime episode reference."""
+        return self._anime_2005_buckets.get(ep_ref.lower().strip(), [])
+
 
 # ============================================
 # WORD BOUNDARY + RANKED CHARACTER SEARCH
@@ -1016,23 +1075,18 @@ def word_boundary_match(query: str, text: str) -> bool:
     return re.search(pattern, text.lower()) is not None
 
 
-def search_characters(
+def _score_characters(
     query: str,
     characters: List[dict],
     use_word_boundary: bool = True,
     use_fuzzy: bool = True
-) -> List[dict]:
-    """Search characters with tiered matching, ranking, optional fuzzy fallback, and relevance scoring.
-
-    v4.1: Improved null safety — all .get() calls default to '' explicitly
-    and coerce None values to empty string.
-    """
+) -> List[Tuple[float, dict]]:
+    """Shared scoring core for character search. Returns sorted (score, char) list."""
     q = query.lower().strip()
     if not q:
         return []
 
     query_tokens = re.findall(r'\w+', q)
-
     scored: List[Tuple[float, dict]] = []
     seen_ids: Set[int] = set()
 
@@ -1053,52 +1107,57 @@ def search_characters(
         cat_lower = cat.lower()
         desc_lower = desc.lower()
 
-        # Tier 1: Word-boundary match on name
         if use_word_boundary and word_boundary_match(q, name_lower):
-            score = 100.0
+            score = SCORE_WORD_BOUNDARY_NAME
             if name_lower == q:
-                score += 50.0
+                score += SCORE_EXACT_NAME_BONUS
             add(score, char)
             continue
 
-        # Tier 2: Word-boundary match on alternative name
         if use_word_boundary and word_boundary_match(q, alt_lower):
-            add(80.0, char)
+            add(SCORE_WORD_BOUNDARY_ALT, char)
             continue
 
-        # Tier 3: Substring match on name
         if q in name_lower:
-            add(60.0, char)
+            add(SCORE_SUBSTRING_NAME, char)
             continue
 
-        # Tier 4: Exact category match
         if q == cat_lower:
-            add(40.0, char)
+            add(SCORE_CATEGORY_MATCH, char)
             continue
 
-        # Tier 5: Substring match in description
         if q in desc_lower:
             overlap = token_overlap_ratio(query_tokens, desc)
-            add(20.0 + overlap * 10.0, char)
+            add(SCORE_DESC_BASE + overlap * SCORE_DESC_OVERLAY_WEIGHT, char)
             continue
 
-        # Tier 6: Fuzzy token match on name/alt
         if use_fuzzy:
             name_tokens = re.findall(r'\w+', name_lower)
             for nt in name_tokens:
                 ratio = levenshtein_ratio(nt, q)
                 if ratio >= CFG.fuzzy_threshold:
-                    add(15.0 + ratio * 5.0, char)
+                    add(SCORE_FUZZY_NAME_BASE + ratio * SCORE_FUZZY_WEIGHT, char)
                     break
             else:
                 alt_tokens = re.findall(r'\w+', alt_lower)
                 for at in alt_tokens:
                     ratio = levenshtein_ratio(at, q)
                     if ratio >= CFG.fuzzy_threshold:
-                        add(12.0 + ratio * 5.0, char)
+                        add(SCORE_FUZZY_ALT_BASE + ratio * SCORE_FUZZY_WEIGHT, char)
                         break
 
     scored.sort(key=lambda x: -x[0])
+    return scored
+
+
+def search_characters(
+    query: str,
+    characters: List[dict],
+    use_word_boundary: bool = True,
+    use_fuzzy: bool = True
+) -> List[dict]:
+    """Search characters with tiered matching and ranking. Returns dicts only."""
+    scored = _score_characters(query, characters, use_word_boundary, use_fuzzy)
     return [c for _, c in scored[:CFG.max_search_results]]
 
 
@@ -1108,71 +1167,55 @@ def search_characters_with_scores(
     use_word_boundary: bool = True,
     use_fuzzy: bool = True
 ) -> List[Tuple[float, dict]]:
-    """Like search_characters but returns (score, char) tuples for relevance display.
+    """Like search_characters but returns (score, char) tuples for relevance display."""
+    scored = _score_characters(query, characters, use_word_boundary, use_fuzzy)
+    return scored[:CFG.max_search_results]
 
-    v4.1: Same null safety improvements as search_characters.
+
+def _search_stories_linear(
+    query: str,
+    episodes: List[dict],
+    max_results: int
+) -> List[dict]:
+    """Shared linear-scan fallback for story search across episodes list."""
+    q = query.lower()
+    query_tokens = re.findall(r'\w+', q)
+    results: List[dict] = []
+    for ep in episodes:
+        story_a = (ep.get('story_a', '') or '').lower()
+        story_b = (ep.get('story_b', '') or '').lower()
+        if q in story_a or q in story_b:
+            results.append(ep)
+        elif query_tokens and (
+            token_overlap_ratio(query_tokens, story_a) >= 0.5
+            or token_overlap_ratio(query_tokens, story_b) >= 0.5
+        ):
+            results.append(ep)
+    return results[:max_results]
+
+
+def search_stories(query: str, episodes: List[dict], csv_mode: bool) -> List[dict]:
+    """Unified story search: index lookup → fuzzy fallback → linear scan.
+    Used by search_cmd, cross_source_search, and other search paths.
     """
     q = query.lower().strip()
     if not q:
         return []
 
-    query_tokens = re.findall(r'\w+', q)
-    scored: List[Tuple[float, dict]] = []
-    seen_ids: Set[int] = set()
+    # CSV mode: try specialized lookups first
+    if csv_mode:
+        if len(q) <= 4 and q.upper() in KNOWN_MAGAZINES:
+            return search_index.get_magazine_bucket(q.upper())
+        if re.match(r'^\d{4}-\d{2}$', q):
+            return search_index.get_date_bucket(q)
 
-    def add(score: float, char: dict) -> None:
-        oid = id(char)
-        if oid not in seen_ids:
-            scored.append((score, char))
-            seen_ids.add(oid)
+    # Index lookup
+    index_hits = search_index.search_title(q)
+    if index_hits:
+        return index_hits
 
-    for char in characters:
-        name = char.get('Character Name', '') or ''
-        alt = char.get('Alternative Name', '') or ''
-        cat = char.get('Category', '') or ''
-        desc = char.get('Description', '') or ''
-
-        name_lower = name.lower()
-        alt_lower = alt.lower()
-        cat_lower = cat.lower()
-        desc_lower = desc.lower()
-
-        if use_word_boundary and word_boundary_match(q, name_lower):
-            score = 100.0
-            if name_lower == q:
-                score += 50.0
-            add(score, char)
-            continue
-        if use_word_boundary and word_boundary_match(q, alt_lower):
-            add(80.0, char)
-            continue
-        if q in name_lower:
-            add(60.0, char)
-            continue
-        if q == cat_lower:
-            add(40.0, char)
-            continue
-        if q in desc_lower:
-            overlap = token_overlap_ratio(query_tokens, desc)
-            add(20.0 + overlap * 10.0, char)
-            continue
-        if use_fuzzy:
-            name_tokens = re.findall(r'\w+', name_lower)
-            for nt in name_tokens:
-                ratio = levenshtein_ratio(nt, q)
-                if ratio >= CFG.fuzzy_threshold:
-                    add(15.0 + ratio * 5.0, char)
-                    break
-            else:
-                alt_tokens = re.findall(r'\w+', alt_lower)
-                for at in alt_tokens:
-                    ratio = levenshtein_ratio(at, q)
-                    if ratio >= CFG.fuzzy_threshold:
-                        add(12.0 + ratio * 5.0, char)
-                        break
-
-    scored.sort(key=lambda x: -x[0])
-    return scored[:CFG.max_search_results]
+    # Linear scan fallback
+    return _search_stories_linear(q, episodes, CFG.max_search_results)
 
 
 # ============================================
@@ -1295,7 +1338,7 @@ class DatabaseManager:
         try:
             h = hashlib.sha256()
             with open(filepath, 'rb') as f:
-                for chunk in iter(lambda: f.read(8192), b''):
+                for chunk in iter(lambda: f.read(65536), b''):
                     h.update(chunk)
             return h.hexdigest()
         except PermissionError:
@@ -1364,7 +1407,7 @@ class DatabaseManager:
             story: dict = {}
             for i, col_name in enumerate(header):
                 val = row[i].strip() if i < len(row) else ''
-                story[col_name] = sanitize_csv_cell(val)
+                story[col_name] = val  # No sanitization here - done at display time
             story['_raw'] = row
             stories.append(story)
 
@@ -1396,7 +1439,7 @@ class DatabaseManager:
             entry: dict = {}
             for i, col_name in enumerate(header):
                 val = row[i].strip() if i < len(row) else ''
-                entry[col_name] = sanitize_csv_cell(val)
+                entry[col_name] = val  # No sanitization here - done at display time
             entry['_raw'] = row
             raw_entries.append(entry)
 
@@ -1644,7 +1687,7 @@ class DatabaseManager:
 
                     self.char_data = self._parse_char_csv_rows(csv.reader(lines))
                     self.char_data_loaded = True
-                    logger.info(f'Loaded {len(self.char_data)} characters from remote CSV')
+                    logger.info(f'Loaded {len(self.char_data)} characters from remote CSV
                     metrics.record_db_load()
                     return True
 
@@ -1862,54 +1905,21 @@ class DatabaseManager:
                 results['characters'] = char_results
 
         if self.csv_data_loaded and self.csv_stories:
-            index_hits = search_index.search_title(q)
-            if index_hits:
+            story_hits = search_stories(q, self.episodes, csv_mode=True)
+            if story_hits:
                 deduped = []
-                for item in index_hits:
+                for item in story_hits:
                     k = _dedup_key(item)
                     if k not in seen_keys:
                         seen_keys.add(k)
                         deduped.append(item)
                 results['manga_stories'] = deduped
-            else:
-                query_tokens = re.findall(r'\w+', q)
-                story_results: List[dict] = []
-                for ep in self.episodes:
-                    story_a = ep.get('story_a', '').lower()
-                    story_b = ep.get('story_b', '').lower() if ep.get('story_b') else ''
-                    if q in story_a or q in story_b:
-                        story_results.append(ep)
-                    elif query_tokens and (
-                        token_overlap_ratio(query_tokens, story_a) >= 0.5
-                        or token_overlap_ratio(query_tokens, story_b) >= 0.5
-                    ):
-                        story_results.append(ep)
-                if story_results:
-                    deduped = []
-                    for item in story_results[:CFG.max_search_results]:
-                        k = _dedup_key(item)
-                        if k not in seen_keys:
-                            seen_keys.add(k)
-                            deduped.append(item)
-                    results['manga_stories'] = deduped
 
         if self.episodes and not self.is_csv_source() and not self.is_char_source():
-            # JSON mode search
-            query_tokens = re.findall(r'\w+', q)
-            json_results: List[dict] = []
-            for ep in self.episodes:
-                story_a = ep.get('story_a', '').lower()
-                story_b = ep.get('story_b', '').lower() if ep.get('story_b') else ''
-                if q in story_a or q in story_b:
-                    json_results.append(ep)
-                elif query_tokens and (
-                    token_overlap_ratio(query_tokens, story_a) >= 0.5
-                    or token_overlap_ratio(query_tokens, story_b) >= 0.5
-                ):
-                    json_results.append(ep)
-            if json_results:
+            json_hits = search_stories(q, self.episodes, csv_mode=False)
+            if json_hits:
                 deduped = []
-                for item in json_results[:CFG.max_search_results]:
+                for item in json_hits:
                     k = _dedup_key(item)
                     if k not in seen_keys:
                         seen_keys.add(k)
@@ -1917,7 +1927,6 @@ class DatabaseManager:
                 results['episodes'] = deduped
 
         return results
-
 
 # ============================================
 # EMBED HELPERS WITH SAFETY CHECKS (Shared)
@@ -1961,6 +1970,10 @@ def safe_add_field(embed: Embed, *, name: str, value: str = '', inline: bool = F
 
     embed.add_field(name=name, value=value, inline=inline)
     return True
+
+def safe_display(value: str) -> str:
+    """Sanitize a value for safe display in Discord embeds (prevents CSV injection if exported)."""
+    return sanitize_csv_cell(value) if value else ''
 
 def build_csv_result_fields(embed: Embed, story: dict) -> None:
     """Populate an embed with standard CSV story fields."""
@@ -2031,7 +2044,6 @@ def build_char_more_matches_field(embed: Embed, results: List[dict], max_shown: 
 
     safe_add_field(embed, name=f'More Matches ({len(results) - 1})', value='\n'.join(lines), inline=False)
 
-
 # ============================================
 # SHARED EMBED BUILDER (DRY)
 # ============================================
@@ -2073,7 +2085,6 @@ def build_list_item_field(embed: Embed, record: dict, source_type: str) -> None:
             title_display += f' / {truncate(story_b, 40)}'
         safe_add_field(embed, name=f'{in_ep} | JP: {jp_st}', value=title_display, inline=False)
 
-
 def build_list_embed(data: List[dict], page: int, page_size: int, source_type: str,
                      filter_val: Optional[str], source_name: str) -> Embed:
     """Build a paginated list embed (shared by list_cmd and ListNavigationView)."""
@@ -2102,7 +2113,6 @@ def build_list_embed(data: List[dict], page: int, page_size: int, source_type: s
     embed.set_footer(text=footer)
 
     return embed
-
 
 # ============================================
 # JUMP-TO-PAGE MODAL
@@ -2145,7 +2155,6 @@ class JumpToPageModal(ui.Modal, title='Jump to Page'):
         self.view.page = page
         await self.view.update_message(interaction)
 
-
 # ============================================
 # PAGINATION VIEW WITH BUTTONS
 # ============================================
@@ -2156,11 +2165,12 @@ class ListNavigationView(ui.View):
     v4.1: Custom IDs now include channel_id and message_id to prevent
     collisions when multiple pagination views exist simultaneously.
     Timeout pulled from config (CFG.view_timeout_seconds).
+    Ownership checks prevent other users from using the paginator.
     """
 
     def __init__(self, data: List[dict], page: int, page_size: int,
                  source_type: str, filter_val: Optional[str], dm_ref,
-                 channel_id: int, message_id: Optional[int]):
+                 channel_id: int = 0, message_id: Optional[int] = None):
         super().__init__(timeout=CFG.view_timeout_seconds)
         self.data = data
         self.page = page
@@ -2170,11 +2180,10 @@ class ListNavigationView(ui.View):
         self.dm_ref = dm_ref
         self.channel_id = channel_id
         self.message_id = message_id
+        self.original_user_id = None
+        self.message = None
 
         self.total_pages = max(1, (len(data) + page_size - 1) // page_size if data else 1)
-
-        # Build dynamic custom_id suffix for uniqueness across channels/messages
-        self._id_suffix = f"_{channel_id}_{message_id or 'nop'}"
 
         self._update_button_states()
 
@@ -2185,7 +2194,13 @@ class ListNavigationView(ui.View):
         self.last_button.disabled = self.page >= self.total_pages
 
     async def on_timeout(self) -> None:
-        pass
+        for child in self.children:
+            child.disabled = True
+        try:
+            if hasattr(self, 'message') and self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
 
     def _build_embed(self) -> Embed:
         return build_list_embed(
@@ -2195,6 +2210,12 @@ class ListNavigationView(ui.View):
         )
 
     async def update_message(self, interaction: Interaction) -> None:
+        if hasattr(self, 'original_user_id') and self.original_user_id is not None:
+            if interaction.user.id != self.original_user_id:
+                await interaction.response.send_message(
+                    'This paginator belongs to another user.', ephemeral=True
+                )
+                return
         self._update_button_states()
         embed = self._build_embed()
         await interaction.response.edit_message(embed=embed, view=self)
@@ -2227,7 +2248,6 @@ class ListNavigationView(ui.View):
     @ui.button(label='🔢 Jump', style=ButtonStyle.success)
     async def jump_button(self, interaction: Interaction, button: ui.Button):
         await interaction.response.send_modal(JumpToPageModal(self))
-
 
 # ============================================
 # MULTI-RESULT SELECT MENU
@@ -2266,6 +2286,13 @@ class ResultSelectMenu(ui.Select):
         )
 
     async def callback(self, interaction: Interaction) -> None:
+        view = self.view
+        if hasattr(view, 'original_user_id') and view.original_user_id is not None:
+            if interaction.user.id != view.original_user_id:
+                await interaction.response.send_message(
+                    'This menu belongs to another user.', ephemeral=True
+                )
+                return
         idx = int(self.values[0])
         result = self.results[idx]
 
@@ -2309,17 +2336,26 @@ class ResultSelectMenu(ui.Select):
         embed.set_footer(text=f'Source: {dm.current_source["name"]}')
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
 class ResultSelectView(ui.View):
     """View containing the result select menu.
 
-    v4.1: Timeout pulled from config.
+    v4.1: Timeout pulled from config. Ownership tracking added.
     """
 
-    def __init__(self, results: List[dict], source_type: str):
+    def __init__(self, results: List[dict], source_type: str, original_user_id: Optional[int] = None):
         super().__init__(timeout=CFG.view_timeout_seconds)
+        self.original_user_id = original_user_id
+        self.message = None
         self.add_item(ResultSelectMenu(results, source_type))
 
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        try:
+            if hasattr(self, 'message') and self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
 
 # ============================================
 # BOT SETUP
@@ -2371,7 +2407,6 @@ _ready_flag = False
 # v4.1: Shutdown flag for async-safe cleanup (set in signal handler, consumed by event loop)
 _shutdown_event = asyncio.Event()
 
-
 # ============================================
 # GRACEFUL SHUTDOWN (v4.1: Async-safe signal handling)
 # ============================================
@@ -2406,25 +2441,19 @@ def graceful_shutdown(signum, frame):
         logger.warning(f'Async cleanup scheduling failed ({e}), forcing exit.')
         sys.exit(0)
 
-
 def _schedule_async_cleanup(signum: int) -> None:
     """Schedule the async cleanup coroutine on the running event loop."""
     asyncio.ensure_future(_async_shutdown())
 
-
 async def _async_shutdown() -> None:
-    """Perform async cleanup: cancel background task, close session, then exit.
-
-    v4.1: New function — replaces unsafe run_until_complete in signal handler.
-    Cancels the auto-refresh background task and closes the aiohttp session.
-    """
+    """Perform async cleanup: cancel background task, close session, close bot, then exit."""
     logger.info('Starting async shutdown sequence...')
     try:
         if auto_refresh_task.is_running():
             auto_refresh_task.cancel()
             logger.info('Auto-refresh task cancelled.')
             try:
-                await asyncio.wait_for(auto_refresh_task.cancel_task(), timeout=2.0)
+                await asyncio.wait_for(auto_refresh_task, timeout=2.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
     except Exception:
@@ -2436,15 +2465,23 @@ async def _async_shutdown() -> None:
     except Exception:
         pass
 
+    try:
+        search_cache.close()
+        logger.info('SQLite cache connection closed.')
+    except Exception:
+        pass
+
+    try:
+        await bot.close()
+        logger.info('Bot gateway closed.')
+    except Exception:
+        pass
+
     logger.info('Graceful shutdown complete. Goodbye!')
-
-    # Schedule sys.exit on the next loop iteration
-    asyncio.get_event_loop().call_soon(sys.exit, 0)
-
+    os._exit(0)
 
 signal.signal(signal.SIGINT, graceful_shutdown)
 signal.signal(signal.SIGTERM, graceful_shutdown)
-
 
 # ============================================
 # AUTOCOMPLETE FUNCTIONS
@@ -2469,7 +2506,6 @@ async def autocomplete_character_names(
         ][:25]
     return [app_commands.Choice(name=n, value=n) for n in names if n]
 
-
 async def autocomplete_magazine_codes(
     interaction: discord.Interaction,
     current: str
@@ -2480,7 +2516,6 @@ async def autocomplete_magazine_codes(
     if q:
         codes = [c for c in codes if q in c]
     return [app_commands.Choice(name=c, value=c) for c in codes[:25]]
-
 
 async def autocomplete_categories(
     interaction: discord.Interaction,
@@ -2495,7 +2530,6 @@ async def autocomplete_categories(
     if q:
         cats = [c for c in cats if q in c.lower()]
     return [app_commands.Choice(name=c, value=c) for c in cats[:25]]
-
 
 # ============================================
 # MODE-AWARE SEARCH AUTOCOMPLETE
@@ -2534,7 +2568,6 @@ async def autocomplete_search(
 
     return []
 
-
 # ============================================
 # SOURCE MANAGEMENT COMMANDS
 # ============================================
@@ -2566,7 +2599,6 @@ async def source_cmd(interaction: discord.Interaction):
     embed.set_footer(text=f'Source ID: {dm.current_source["id"]} | Switch with /source_change <id>')
     await interaction.response.send_message(embed=embed)
 
-
 @bot.tree.command(name='source_all', description='Lists all available database sources')
 @rate_limited('source_all')
 async def source_all_cmd(interaction: discord.Interaction):
@@ -2588,7 +2620,6 @@ async def source_all_cmd(interaction: discord.Interaction):
     safe_add_field(embed, name='How to switch',
                    value='Use `/source_change <number>` to switch\nExample: `/source_change 2`', inline=False)
     await interaction.response.send_message(embed=embed)
-
 
 @bot.tree.command(name='source_status', description='Shows detailed status of all database sources')
 @rate_limited('source_status')
@@ -2625,7 +2656,6 @@ async def source_status_cmd(interaction: discord.Interaction):
                    inline=False)
 
     await interaction.response.send_message(embed=embed)
-
 
 @bot.tree.command(name='source_change', description='Changes the active database source')
 @app_commands.describe(source_id='Source number to switch to (1=JSON, 2=CSV, 3=Remote Chars, 4=Local Chars)')
@@ -2713,7 +2743,6 @@ async def source_change_cmd(interaction: discord.Interaction, source_id: int):
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
 @bot.tree.command(name='reload', description='Force reload the current database source (Admin only)')
 @admin_only()
 @rate_limited('reload', limit=2)
@@ -2744,7 +2773,6 @@ async def reload_cmd(interaction: discord.Interaction):
         embed = Embed(title='Error', description='An error occurred during reload.',
                       color=CFG.color_error)
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 # ============================================
 # HEALTH CHECK COMMAND
@@ -2791,7 +2819,6 @@ async def health_cmd(interaction: discord.Interaction):
     embed.set_footer(text=f'Bot v{BOT_VERSION} | Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
 
-
 # ============================================
 # SEARCH COMMAND
 # ============================================
@@ -2801,13 +2828,14 @@ async def health_cmd(interaction: discord.Interaction):
 @app_commands.autocomplete(query=autocomplete_search)
 @rate_limited('search')
 async def search_cmd(interaction: discord.Interaction, query: str):
+    await interaction.response.defer()
     coro_id = generate_correlation_id()
     q_raw = sanitize_query(query, CFG.max_query_length)
     if not q_raw:
         embed = Embed(title='Empty Query',
                       description='Please provide a search term.',
                       color=CFG.color_error)
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
 
     if not dm.episodes and not dm.char_data:
@@ -2816,7 +2844,7 @@ async def search_cmd(interaction: discord.Interaction, query: str):
             description='No episodes loaded. Use `/source` to check status.',
             color=CFG.color_error
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
 
     q = q_raw.lower()
@@ -2851,22 +2879,7 @@ async def search_cmd(interaction: discord.Interaction, query: str):
             elif re.match(r'^\d{4}-\d{2}$', q):
                 results = search_index.get_date_bucket(q)
             if not results:
-                index_hits = search_index.search_title(q)
-                if index_hits:
-                    results = index_hits
-                else:
-                    query_tokens = re.findall(r'\w+', q)
-                    for ep in dm.episodes:
-                        story_a = ep.get('story_a', '').lower()
-                        story_b = ep.get('story_b', '').lower() if ep.get('story_b') else ''
-                        if q in story_a or q in story_b:
-                            results.append(ep)
-                        elif query_tokens and (
-                            token_overlap_ratio(query_tokens, story_a) >= 0.5
-                            or token_overlap_ratio(query_tokens, story_b) >= 0.5
-                        ):
-                            results.append(ep)
-                    results = results[:CFG.max_search_results]
+                results = search_stories(q, dm.episodes, csv_mode=True)
         else:
             if q.startswith('jp:') or q.isdigit() or re.match(r'^s\d+\s*s?$', q, re.I):
                 jp_query = q.replace('jp:', '').strip()
@@ -2903,18 +2916,7 @@ async def search_cmd(interaction: discord.Interaction, query: str):
                            if e.get('in_season_episode', '').upper().startswith('CE')
                            and ce_num in e.get('in_season_episode', '')]
             if not results:
-                query_tokens = re.findall(r'\w+', q)
-                for ep in dm.episodes:
-                    story_a = ep.get('story_a', '').lower()
-                    story_b = ep.get('story_b', '').lower() if ep.get('story_b') else ''
-                    if q in story_a or q in story_b:
-                        results.append(ep)
-                    elif query_tokens and (
-                        token_overlap_ratio(query_tokens, story_a) >= 0.5
-                        or token_overlap_ratio(query_tokens, story_b) >= 0.5
-                    ):
-                        results.append(ep)
-                results = results[:CFG.max_search_results]
+                results = search_stories(q, dm.episodes, csv_mode=False)
 
         search_cache.set(source_type, q, results)
         metrics.record_search(source_type, False)
@@ -2951,7 +2953,7 @@ async def search_cmd(interaction: discord.Interaction, query: str):
             color=CFG.color_error
         )
         embed.timestamp = utc_now()
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
 
     first = results[0]
@@ -3012,13 +3014,14 @@ async def search_cmd(interaction: discord.Interaction, query: str):
     source_type_val = dm.current_source['type']
 
     if len(results) > 1:
-        view = ResultSelectView(results[:25], source_type_val)
+        view = ResultSelectView(results[:25], source_type_val, original_user_id=interaction.user.id)
         footer = f'Matches: {len(results)} | Source: {dm.current_source["name"]}'
         if cache_hit:
             footer += ' [Cached]'
         footer += ' | Use dropdown to view details'
         embed.set_footer(text=footer)
-        await interaction.response.send_message(embed=embed, view=view)
+        await interaction.followup.send(embed=embed, view=view)
+        view.message = await interaction.original_response()
         return
 
     # Single result case
@@ -3026,8 +3029,7 @@ async def search_cmd(interaction: discord.Interaction, query: str):
     if cache_hit:
         footer += ' [Cached]'
     embed.set_footer(text=footer)
-    await interaction.response.send_message(embed=embed)
-
+    await interaction.followup.send(embed=embed)
 
 # ============================================
 # CROSS-SOURCE SEARCH COMMAND
@@ -3037,9 +3039,10 @@ async def search_cmd(interaction: discord.Interaction, query: str):
 @app_commands.describe(query='Search term')
 @rate_limited('search_all')
 async def search_all_cmd(interaction: discord.Interaction, query: str):
+    await interaction.response.defer()
     q = sanitize_query(query)
     if not q:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=Embed(title='Empty Query', description='Please provide a search term.',
                         color=CFG.color_error))
         return
@@ -3052,7 +3055,7 @@ async def search_all_cmd(interaction: discord.Interaction, query: str):
             color=CFG.color_error
         )
         embed.timestamp = utc_now()
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
 
     embed = Embed(title=f'Cross-Source Search: {q}', color=CFG.color_primary)
@@ -3077,10 +3080,9 @@ async def search_all_cmd(interaction: discord.Interaction, query: str):
     embed.description = f'Found **{total}** total results across {len(results)} source(s)'
     embed.set_footer(text=f'Use the dropdown(s) below to browse all results | Source: All')
 
-    
-    view = CrossSourceSelectView(results)
-    await interaction.response.send_message(embed=embed, view=view)
-
+    view = CrossSourceSelectView(results, original_user_id=interaction.user.id)
+    await interaction.followup.send(embed=embed, view=view)
+    view.message = await interaction.original_response()
 
 # ============================================
 # JP LOOKUP COMMAND
@@ -3167,7 +3169,6 @@ async def jp_cmd(interaction: discord.Interaction, jp_number: str):
 
     await interaction.response.send_message(embed=embed)
 
-
 # ============================================
 # LIST COMMAND
 # ============================================
@@ -3241,12 +3242,13 @@ async def list_cmd(interaction: discord.Interaction, filter_val: Optional[str] =
         channel_id=interaction.channel.id if hasattr(interaction.channel, 'id') else 0,
         message_id=None
     )
+    view.original_user_id = interaction.user.id
 
     embed = build_list_embed(filtered, page, page_size, source_type, filter_val,
                              dm.current_source['name'])
     metrics.record_command('list')
     await interaction.response.send_message(embed=embed, view=view)
-
+    view.message = await interaction.original_response()
 
 # ============================================
 # RANDOM COMMAND
@@ -3294,7 +3296,6 @@ async def random_cmd(interaction: discord.Interaction):
     embed.set_footer(text=f'Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
 
-
 # ============================================
 # RELATED COMMAND
 # ============================================
@@ -3307,6 +3308,7 @@ async def related_cmd(interaction: discord.Interaction, query: str):
         embed = Embed(title='No Data', description='No stories loaded.', color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
+    await interaction.response.defer()
 
     q = sanitize_query(query).lower()
     csv_mode = dm.is_csv_source()
@@ -3338,15 +3340,14 @@ async def related_cmd(interaction: discord.Interaction, query: str):
                     embed.set_footer(text=f'Showing 10 of {len(bucket)} | Source: {dm.current_source["name"]}')
                 else:
                     embed.set_footer(text=f'Source: {dm.current_source["name"]}')
-                await interaction.response.send_message(embed=embed)
+                await interaction.followup.send(embed=embed)
                 return
 
         embed = Embed(title='No Match Found',
                       description=f'Could not find a story matching "**{query}**".',
                       color=CFG.color_error)
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
-
     # Find related by magazine and date
     mag = (original.get('Magazine code', '') or '').upper().strip()
     date = (original.get('Publication Date', '') or '').strip()
@@ -3367,7 +3368,7 @@ async def related_cmd(interaction: discord.Interaction, query: str):
             description=f'No other stories share the same magazine or date as "**{orig_title}**".',
             color=CFG.color_warning
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
 
     embed = Embed(title=f'Related to: {truncate(orig_title, 70)}', color=CFG.color_primary)
@@ -3385,7 +3386,7 @@ async def related_cmd(interaction: discord.Interaction, query: str):
         embed.set_footer(text=f'Showing 10 of {len(related)} | Source: {dm.current_source["name"]}')
     else:
         embed.set_footer(text=f'Source: {dm.current_source["name"]}')
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 
 # ============================================
@@ -3405,6 +3406,7 @@ async def compare_cmd(interaction: discord.Interaction, name1: str, name2: str):
     if not is_available:
         await interaction.response.send_message(embed=error_embed)
         return
+    await interaction.response.defer()
 
     q1 = sanitize_query(name1).lower()
     q2 = sanitize_query(name2).lower()
@@ -3423,13 +3425,14 @@ async def compare_cmd(interaction: discord.Interaction, name1: str, name2: str):
             description=f'Could not find: {", ".join(f"**{m}**" for m in missing)}',
             color=CFG.color_error
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
 
     c1 = results1[0]
     c2 = results2[0]
 
-    embed = Embed(title=f'Comparing: {truncate(c1.get("Character Name", "?") or "?", 30)} vs {truncate(c2.get("Character Name", "?") or "?", 30)}',                  color=CFG.color_primary)
+    embed = Embed(title=f'Comparing: {truncate(c1.get("Character Name", "?") or "?", 30)} vs {truncate(c2.get("Character Name", "?") or "?", 30)}',
+                  color=CFG.color_primary)
     embed.timestamp = utc_now()
 
     # Side-by-side fields
@@ -3451,7 +3454,7 @@ async def compare_cmd(interaction: discord.Interaction, name1: str, name2: str):
                    value=truncate(c2.get('Description', '') or '', 400), inline=False)
 
     embed.set_footer(text=f'Source: {dm.current_source["name"]}')
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 # ============================================
 # TIMELINE COMMAND
@@ -3469,6 +3472,7 @@ async def timeline_cmd(interaction: discord.Interaction, limit: Optional[int] = 
         embed = Embed(title='No Data', description='No stories loaded.', color=CFG.color_error)
         await interaction.response.send_message(embed=embed)
         return
+    await interaction.response.defer()
 
     csv_mode = dm.is_csv_source()
     data = dm.csv_stories if csv_mode else dm.episodes
@@ -3491,7 +3495,7 @@ async def timeline_cmd(interaction: discord.Interaction, limit: Optional[int] = 
             description='No stories with publication dates found.',
             color=CFG.color_warning
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
 
     # Cap limit
@@ -3514,7 +3518,7 @@ async def timeline_cmd(interaction: discord.Interaction, limit: Optional[int] = 
                        value=truncate(title, 80), inline=False)
 
     embed.set_footer(text=f'Source: {dm.current_source["name"]}')
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 # ============================================
 # STATS COMMAND
@@ -3826,7 +3830,9 @@ async def search_1979_cmd(interaction: discord.Interaction, episode: str):
         return
 
     q = sanitize_query(episode).lower().strip()
-    results = [s for s in dm.csv_stories if q in (s.get('1979 anime', '') or '').lower()]
+    results = search_index.get_anime_1979_bucket(q)
+    if not results:
+        results = [s for s in dm.csv_stories if q in (s.get('1979 anime', '') or '').lower()]
 
     if not results:
         embed = Embed(title='No Results Found',
@@ -3863,7 +3869,9 @@ async def search_2005_cmd(interaction: discord.Interaction, episode: str):
         return
 
     q = sanitize_query(episode).lower().strip()
-    results = [s for s in dm.csv_stories if q in (s.get('2005 anime', '') or '').lower()]
+    results = search_index.get_anime_2005_bucket(q)
+    if not results:
+        results = [s for s in dm.csv_stories if q in (s.get('2005 anime', '') or '').lower()]
 
     if not results:
         embed = Embed(title='No Results Found',
@@ -4017,13 +4025,14 @@ async def character_cmd(interaction: discord.Interaction, name: str):
     if not is_available:
         await interaction.response.send_message(embed=error_embed)
         return
+    await interaction.response.defer()
 
     q = sanitize_query(name)
     if not q:
         embed = Embed(title='Empty Query',
                       description='Please provide a character name.',
                       color=CFG.color_error)
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
 
     q_lower = q.lower()
@@ -4041,7 +4050,7 @@ async def character_cmd(interaction: discord.Interaction, name: str):
             color=CFG.color_error
         )
         embed.timestamp = utc_now()
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
 
     first = results[0]
@@ -4061,18 +4070,19 @@ async def character_cmd(interaction: discord.Interaction, name: str):
 
     if len(results) > 1:
         # Use select menu instead of plain text
-        view = ResultSelectView(results[:25], SourceType.CSV_CHAR.value)
+        view = ResultSelectView(results[:25], SourceType.CSV_CHAR.value, original_user_id=interaction.user.id)
         additional = '\n'.join(
             f'- {r.get("Character Name", "?") or "?"} [{r.get("Category", "") or ""}]'
             for r in results[1:6]
         )
         safe_add_field(embed, name=f'More Matches ({len(results) - 1})', value=additional, inline=False)
         embed.set_footer(text=f'Matches: {len(results)} | Use dropdown to view details | Source: {dm.current_source["name"]}')
-        await interaction.response.send_message(embed=embed, view=view)
+        await interaction.followup.send(embed=embed, view=view)
+        view.message = await interaction.original_response()
         return
 
     embed.set_footer(text=f'Matches: {len(results)} | Source: {dm.current_source["name"]}')
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name='characters_by_category', description='List characters filtered by category (Characters source only)')
 @app_commands.describe(category='Category name (e.g., human, robot, animal)')
@@ -4152,8 +4162,7 @@ async def auto_refresh_task():
         if dm.csv_data_loaded and AIOHTTP_AVAILABLE and dm.is_csv_source():
             success = await dm.load_csv_database_live(CFG.csv_raw_base_url)
             if success:
-                async with dm._lock:
-                    dm.episodes = dm.convert_csv_to_episode_format(dm.csv_stories)
+                await dm.safe_update_episodes(dm.convert_csv_to_episode_format(dm.csv_stories))
                 logger.info(f'Auto-refresh: CSV data updated ({len(dm.episodes)} stories)')
                 search_cache.invalidate_pattern(SourceType.CSV.value)
                 search_index.build_story_index(dm.episodes)
@@ -4168,11 +4177,14 @@ async def auto_refresh_task():
 async def auto_refresh_before():
     """Wait until bot is ready before starting auto-refresh."""
     await bot.wait_until_ready()
+
 class CrossSourceSelectView(ui.View):
     """View with multiple dropdown menus — one per source type."""
 
-    def __init__(self, results: Dict[str, List[dict]]):
+    def __init__(self, results: Dict[str, List[dict]], original_user_id: Optional[int] = None):
         super().__init__(timeout=CFG.view_timeout_seconds)
+        self.original_user_id = original_user_id
+        self.message = None
 
         source_map: Dict[str, str] = {
             'characters':    SourceType.CSV_CHAR.value,
@@ -4188,6 +4200,15 @@ class CrossSourceSelectView(ui.View):
             menu.placeholder = f'Browse {label_display} ({len(source_results)} match(es))...'
 
             self.add_item(menu)
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        try:
+            if hasattr(self, 'message') and self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
 
 # ============================================
 # ERROR HANDLING
@@ -4243,15 +4264,41 @@ async def on_ready():
     global _ready_flag
 
     if _ready_flag:
-        logger.info('on_ready fired again (reconnect) — skipping duplicate database load.')
+        logger.info('on_ready fired again (reconnect) — checking data freshness...')
+        # Trigger a refresh if data might be stale (reconnected after a gap)
+        if AIOHTTP_AVAILABLE:
+            try:
+                if dm.char_data_loaded:
+                    await dm.load_char_csv_remote(CHAR_CSV_RAW_URL)
+                    search_index.build_char_index(dm.char_data)
+                    logger.info('Reconnect: Character data refreshed.')
+                if dm.csv_data_loaded and dm.is_csv_source():
+                    await dm.load_csv_database_live(CFG.csv_raw_base_url)
+                    await dm.safe_update_episodes(dm.convert_csv_to_episode_format(dm.csv_stories))
+                    search_index.build_story_index(dm.episodes)
+                    logger.info('Reconnect: CSV data refreshed.')
+            except Exception as e:
+                logger.warning(f'Reconnect refresh failed: {e}')
         return
 
     _ready_flag = True
 
     logger.info(f'Logged in as {bot.user}')
     logger.info('Syncing slash commands...')
-    synced = await bot.tree.sync()
-    logger.info(f'Synced {len(synced)} GLOBAL commands')
+    dev_guild_id = os.getenv('DEV_GUILD_ID')
+    if dev_guild_id:
+        try:
+            guild_obj = discord.Object(id=int(dev_guild_id))
+            bot.tree.copy_global_to(guild=guild_obj)
+            synced = await bot.tree.sync(guild=guild_obj)
+            logger.info(f'Synced {len(synced)} commands to dev guild {dev_guild_id}')
+        except Exception as e:
+            logger.warning(f'Guild sync failed, falling back to global: {e}')
+            synced = await bot.tree.sync()
+            logger.info(f'Synced {len(synced)} GLOBAL commands')
+    else:
+        synced = await bot.tree.sync()
+        logger.info(f'Synced {len(synced)} GLOBAL commands')
 
     if bot.guilds:
         logger.info(f'Bot is in {len(bot.guilds)} guild(s)')
@@ -4313,6 +4360,13 @@ async def on_ready():
     logger.info(f'Admin-only commands: /source_change, /reload')
     logger.info(f'Auto-refresh: Every {AUTO_REFRESH_INTERVAL_HOURS}h')
     logger.info(f'Graceful shutdown: SIGTERM/SIGINT handlers active')
+
+    if not dm.episodes and not dm.char_data:
+        logger.critical(
+            '⚠️  NO DATA SOURCES LOADED! Bot will be non-functional. '
+            'Check file paths, internet connection, and source configuration.'
+        )
+
     logger.info('\n✅ Bot is ready!\n')
 
 # ============================================
@@ -4333,4 +4387,3 @@ if __name__ == '__main__':
         logger.critical(f'Fatal error starting bot: {type(e).__name__}: {e}')
         logger.error('Check your DISCORD_TOKEN and permissions.')
         sys.exit(1)
-
