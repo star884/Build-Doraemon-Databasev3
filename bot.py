@@ -1369,6 +1369,7 @@ class DatabaseManager:
                 logger.warning(f'Current working directory: {Path.cwd()}')
                 self.episodes = []
                 return False
+
             with open(path, encoding='utf-8') as f:
                 self.db = json.load(f)
 
@@ -1388,7 +1389,6 @@ class DatabaseManager:
             logger.error(f'Error loading JSON database: {e}')
             metrics.record_error(type(e).__name__)
             return False
-
     def _parse_csv_rows(self, reader) -> List[dict]:
         """Parse CSV rows with backwards-compatible column mapping and validation."""
         stories: List[dict] = []
