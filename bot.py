@@ -1292,23 +1292,9 @@ class DatabaseManager:
         return next((s for s in self.available_sources if s.id == sid), None)
 
     async def safe_update_episodes(self, episodes: List[dict]) -> None:
-     async def safe_update_episodes(self, episodes: List[dict]) -> None:
         async with self._lock:
             self.episodes = episodes
 
-    async def safe_update_csv(self, stories: List[dict]) -> None:
-        async with self._lock:
-            self.csv_stories = stories
-            self.csv_data_loaded = True
-
-    async def safe_update_chars(self, chars: List[dict]) -> None:
-        async with self._lock:
-            self.char_data = chars
-            self.char_data_loaded = True
-
-    async def safe_update_source(self, source: Dict[str, Any]) -> None:
-        async with self._lock:
-            self.current_source = source.copy()
     async def safe_update_csv(self, stories: List[dict]) -> None:
         async with self._lock:
             self.csv_stories = stories
