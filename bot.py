@@ -1357,19 +1357,26 @@ class DatabaseManager:
     def load_json_database(self) -> bool:
         """Load data from local JSON database."""
         try:
-            db_path = CFG.json_db_path if CFG.json_db_path else 'database/search_index.json'
+            if CFG.json_db_path:
+                db_path = CFG.json_db_path
+            else:
+                base_dir = Path(__file__).parent.resolve()
+                db_path = str(base_dir / 'database' / 'search_index.json')
             path = Path(db_path)
 
             if not path.exists():
-                logger.warning('JSON database file not found at database/search_index.json')
+                logger.warning(f'JSON database file not found at: {path.absolute()}')
+                logger.warning(f'Current working directory: {Path.cwd()}')
                 self.episodes = []
                 return False
-
             with open(path, encoding='utf-8') as f:
                 self.db = json.load(f)
 
             self.episodes = self.db.get('items', [])
             logger.info(f'Loaded {len(self.episodes)} episodes from JSON database')
+            if len(self.episodes) == 0:
+                logger.warning('JSON loaded but contains NO records!')
+                logger.warning(f'JSON keys found: {list(self.db.keys())[:10]}')
             self.episodes_source = SourceType.JSON
         except json.JSONDecodeError as e:
             self.episodes = []
@@ -2792,8 +2799,13 @@ async def health_cmd(interaction: discord.Interaction):
     embed.add_field(name='Cache Size', value=f'{search_cache.get_size()} entries', inline=True)
     embed.add_field(name='Last DB Load', value=metrics.last_db_load_time or 'N/A', inline=True)
 
-    episode_src = 'CSV-Derived [⚠️]' if dm.episodes_source == SourceType.CSV else ''
-    embed.add_field(name='JSON Episodes', value=str(len(dm.episodes)) + (' ' + episode_src if episode_src else ''), inline=True)
+    if dm.episodes_source == SourceType.CSV:
+        episode_label = 'Episodes (from CSV)'
+    elif dm.episodes_source == SourceType.JSON:
+        episode_label = 'JSON Episodes'
+    else:
+        episode_label = 'Episodes'
+    embed.add_field(name=episode_label, value=str(len(dm.episodes)), inline=True)
     embed.add_field(name='CSV Stories', value=str(len(dm.csv_stories)), inline=True)
     embed.add_field(name='Characters', value=str(len(dm.char_data)), inline=True)
 
