@@ -1687,7 +1687,16 @@ class DatabaseManager:
 
                     self.char_data = self._parse_char_csv_rows(csv.reader(lines))
                     self.char_data_loaded = True
-                    logger.info(f'Loaded {len(self.char_data)} characters from remote CSV
+                    logger.info(f'Loaded {len(self.char_data)} characters from remote CSV')
+                    metrics.record_db_load()
+                    return True
+
+            except Exception as e:
+                logger.error(f'Error fetching character CSV: {type(e).__name__}: {e}')
+                metrics.record_error(type(e).__name__)
+                self.char_data = []
+                self.char_data_loaded = False
+                return False
                     metrics.record_db_load()
                     return True
 
