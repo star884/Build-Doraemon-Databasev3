@@ -265,6 +265,7 @@ class BotConfig:
     log_json: bool = os.getenv('LOG_JSON', 'false').lower() == 'true'
 
     home_dir: str = os.getenv('HOME_DIR', os.path.expanduser("~"))
+    json_db_path: str = os.getenv('JSON_DB_PATH', '')  # ← NEW
 
     # v4.1: Configurable view/UI timeouts (previously hardcoded 180)
     view_timeout_seconds: int = int(os.getenv('VIEW_TIMEOUT', '180'))
@@ -1283,6 +1284,7 @@ class DatabaseManager:
 
         self.current_source: Dict[str, Any] = self.available_sources[0].to_dict()
         self._lock = asyncio.Lock()
+        self.episodes_source: Optional[SourceType] = None
 
     @property
     def current_source_obj(self) -> Optional[DataSource]:
@@ -1355,7 +1357,7 @@ class DatabaseManager:
     def load_json_database(self) -> bool:
         """Load data from local JSON database."""
         try:
-            db_path = 'database/search_index.json'
+            db_path = CFG.json_db_path if CFG.json_db_path else 'database/search_index.json'
             path = Path(db_path)
 
             if not path.exists():
@@ -1368,6 +1370,7 @@ class DatabaseManager:
 
             self.episodes = self.db.get('items', [])
             logger.info(f'Loaded {len(self.episodes)} episodes from JSON database')
+            self.episodes_source = SourceType.JSON
         except json.JSONDecodeError as e:
             self.episodes = []
             logger.error(f'Invalid JSON in database file: {e}')
@@ -1547,6 +1550,8 @@ class DatabaseManager:
 
             self.csv_stories = stories
             self.csv_data_loaded = True
+            async with self._lock:
+                self.episodes_source = SourceType.CSV
             logger.info(f'Loaded {len(self.csv_stories)} stories from local CSV (offline mode)')
             metrics.record_db_load()
             return True
@@ -1864,6 +1869,7 @@ class DatabaseManager:
             async with self._lock:
                 self.episodes = self.convert_csv_to_episode_format(self.csv_stories)
                 self.current_source = self.available_sources[1].to_dict()
+                self.episodes_source = SourceType.CSV
             search_index.build_story_index(self.episodes)
             return
 
@@ -2786,7 +2792,8 @@ async def health_cmd(interaction: discord.Interaction):
     embed.add_field(name='Cache Size', value=f'{search_cache.get_size()} entries', inline=True)
     embed.add_field(name='Last DB Load', value=metrics.last_db_load_time or 'N/A', inline=True)
 
-    embed.add_field(name='JSON Episodes', value=str(len(dm.episodes)), inline=True)
+    episode_src = 'CSV-Derived [⚠️]' if dm.episodes_source == SourceType.CSV else ''
+    embed.add_field(name='JSON Episodes', value=str(len(dm.episodes)) + (' ' + episode_src if episode_src else ''), inline=True)
     embed.add_field(name='CSV Stories', value=str(len(dm.csv_stories)), inline=True)
     embed.add_field(name='Characters', value=str(len(dm.char_data)), inline=True)
 
