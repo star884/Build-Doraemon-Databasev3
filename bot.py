@@ -10,7 +10,8 @@ cross-source search, SQLite cache persistence, and much more.
 
 Improvements in v4.1 (from review):
 - Signal handler rewritten to use flag + loop-scheduled cleanup (no async-in-signal)
-- SQLite connections now thread-locked with check_same_thread=False
+- 
+SQLite connections now thread-locked with check_same_thread=False
 - Pagination custom_ids made unique per-channel-per-message
 - Embed total length calculation includes title + description + fields
 - Background task cancelled on graceful shutdown
@@ -1367,9 +1368,6 @@ class DatabaseManager:
 
             self.episodes = self.db.get('items', [])
             logger.info(f'Loaded {len(self.episodes)} episodes from JSON database')
-            metrics.record_db_load()
-            return True
-
         except json.JSONDecodeError as e:
             self.episodes = []
             logger.error(f'Invalid JSON in database file: {e}')
@@ -1688,15 +1686,6 @@ class DatabaseManager:
                     self.char_data = self._parse_char_csv_rows(csv.reader(lines))
                     self.char_data_loaded = True
                     logger.info(f'Loaded {len(self.char_data)} characters from remote CSV')
-                    metrics.record_db_load()
-                    return True
-
-            except Exception as e:
-                logger.error(f'Error fetching character CSV: {type(e).__name__}: {e}')
-                metrics.record_error(type(e).__name__)
-                self.char_data = []
-                self.char_data_loaded = False
-                return False
                     metrics.record_db_load()
                     return True
 
