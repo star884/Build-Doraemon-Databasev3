@@ -1557,8 +1557,7 @@ class DatabaseManager:
 
             self.csv_stories = stories
             self.csv_data_loaded = True
-            async with self._lock:
-                self.episodes_source = SourceType.CSV
+            self.episodes_source = SourceType.CSV
             logger.info(f'Loaded {len(self.csv_stories)} stories from local CSV (offline mode)')
             metrics.record_db_load()
             return True
