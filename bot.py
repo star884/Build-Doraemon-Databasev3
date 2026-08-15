@@ -25,6 +25,9 @@ SQLite connections now thread-locked with check_same_thread=False
 - Null safety improvements on .get() chains
 - Levenshtein identical-string shortcut for performance
 """
+from keep_alive import keep_alive
+
+keep_alive()
 
 import json
 import os
