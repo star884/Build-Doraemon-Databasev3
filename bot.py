@@ -62,25 +62,6 @@ except ImportError:
     print('Install with: pip install aiohttp')
     AIOHTTP_AVAILABLE = False
 
-# ============================================================================================================
-# ENVIRONMENT VARIABLES FOR PRIVATE REPOSITORY ACCESS
-# ============================================================================================================
-# Configure these in your .env file (NEVER commit to git!):
-#
-# GITHUB_PAT=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-#   - REQUIRED for private repositories
-#   - Create: https://github.com/settings/tokens
-#   - Scope: `repo` (Full control of private repos)
-#
-# GITHUB_PUBLIC_FALLBACK=true (optional, default)
-#   - Try public CDN if auth fails
-#
-# SECURITY:
-# • Never commit GITHUB_PAT to version control
-# • Rotate tokens periodically (90 days recommended)
-# • Use fine-grained PATs for minimal permissions
-# ============================================================================================================
-
 
 # ============================================
 # CONSTANTS & MAGIC NUMBERS
@@ -289,12 +270,6 @@ class BotConfig:
     # v4.1: Configurable view/UI timeouts (previously hardcoded 180)
     view_timeout_seconds: int = int(os.getenv('VIEW_TIMEOUT', '180'))
 
-    # ================================================================================
-    # GITHUB PRIVATE REPOSITORY ACCESS
-    # ================================================================================
-    github_token: str = os.getenv('GITHUB_PAT', '')  # Personal Access Token with 'repo' scope
-    use_public_fallback: bool = os.getenv('GITHUB_PUBLIC_FALLBACK', 'true').lower() == 'true'
-
     @property
     def csv_local_path(self) -> str:
         return os.path.join(self.home_dir, "Doraemon-CSV-DB", "database") + "/"
@@ -322,22 +297,7 @@ class BotConfig:
             warnings.append(f"CACHE_MAX_SIZE={self.cache_max_size} is very low; may cause frequent evictions.")
         if self.view_timeout_seconds < 10 or self.view_timeout_seconds > 3600:
             warnings.append(f"VIEW_TIMEOUT={self.view_timeout_seconds} should be between 10 and 3600 seconds.")
-
-        # GitHub token validation
-        if self.github_token and not self._validate_github_token_format():
-            warnings.append("GITHUB_PAT set but appears invalid (should be 'ghp_' prefix)")
-        elif not self.github_token:
-            warnings.append("No GITHUB_PAT set - private repositories will NOT be accessible")
-
         return warnings
-
-    def _validate_github_token_format(self) -> bool:
-        """Basic validation of GitHub PAT format."""
-        if not self.github_token:
-            return False
-        return (self.github_token.startswith('ghp_') or 
-                self.github_token.startswith('github_pat_') or
-                len(self.github_token) >= 40)
 
 
 # ============================================
@@ -1356,24 +1316,13 @@ class DatabaseManager:
         return self.current_source['type'] == SourceType.CSV_CHAR.value
 
     async def get_session(self) -> Optional[aiohttp.ClientSession]:
-        """Get or create a shared aiohttp ClientSession (connection pooling) with GitHub auth."""
+        """Get or create a shared aiohttp ClientSession (connection pooling)."""
         if not AIOHTTP_AVAILABLE:
             return None
         if self._session is None or self._session.closed:
-            headers = {}
-
-            # Attach GitHub token for private repository access
-            if CFG.github_token:
-                headers['Authorization'] = f'token {CFG.github_token}'
-                headers['Accept'] = 'application/vnd.github.v3+json'
-                logger.info('GitHub PAT configured - authenticated requests enabled for private repos')
-            else:
-                logger.warning('No GITHUB_PAT set - only public repositories accessible')
-
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=CFG.http_timeout_seconds),
-                connector=aiohttp.TCPConnector(limit=10, limit_per_host=5),
-                headers=headers
+                connector=aiohttp.TCPConnector(limit=10, limit_per_host=5)
             )
         return self._session
 
@@ -1627,21 +1576,12 @@ class DatabaseManager:
             return False
 
     async def load_csv_database_live(self, source_url: str) -> bool:
-        """Fetch CSV data from GitHub with retry logic using shared session.
-
-        v4.2: Uses authenticated requests when GITHUB_PAT is configured.
-        """
+        """Fetch CSV data from GitHub with retry logic using shared session."""
         if not AIOHTTP_AVAILABLE:
             logger.error('aiohttp not installed - remote fetching disabled')
             self.csv_stories = []
             self.csv_data_loaded = False
             return False
-
-        # Log authentication status before attempting fetch
-        if CFG.github_token:
-            logger.info('Using authenticated GitHub access for CSV fetch')
-        else:
-            logger.warning('Fetching from GitHub without authentication (public repos only)')
 
         async with self._lock:
             try:
@@ -1650,12 +1590,11 @@ class DatabaseManager:
 
                 if success:
                     self.csv_data_loaded = True
-                    logger.info(f'Loaded {len(self.csv_stories)} stories from CSV')
+                    logger.info(f'Loaded {len(self.csv_stories)} stories from CSV (online mode)')
                     metrics.record_db_load()
                     return True
                 else:
                     self.csv_data_loaded = False
-                    logger.error('Failed to fetch CSV after all retries')
                     return False
 
             except Exception as e:
@@ -1732,10 +1671,7 @@ class DatabaseManager:
             return False
 
     async def load_char_csv_remote(self, url: str) -> bool:
-        """Fetch and parse characters CSV from GitHub raw URL using shared session.
-
-        v4.2: Includes authentication support for private repositories and detailed error messages.
-        """
+        """Fetch and parse characters CSV from GitHub raw URL using shared session."""
         if not AIOHTTP_AVAILABLE:
             logger.error('aiohttp not installed - remote fetching disabled')
             self.char_data = []
@@ -1749,37 +1685,21 @@ class DatabaseManager:
                     return False
 
                 async with session.get(url) as resp:
-                    if resp.status == 200:
-                        content = await resp.text(encoding='utf-8')
-                        lines = content.splitlines()
-
-                        if not lines:
-                            logger.warning('Character CSV returned empty content')
-                            return False
-
-                        self.char_data = self._parse_char_csv_rows(csv.reader(lines))
-                        self.char_data_loaded = True
-                        logger.info(f'Loaded {len(self.char_data)} characters from remote CSV')
-                        metrics.record_db_load()
-                        return True
-
-                    elif resp.status == 401:
-                        logger.error(f'Authentication failed (401). Check GITHUB_PAT validity.')
-                        logger.info('If repo is private, ensure PAT has "repo" scope and is not expired.')
-                        return False
-
-                    elif resp.status == 404:
-                        logger.error(f'Repository/file not found (404). Verify path exists.')
-                        return False
-
-                    elif resp.status == 403:
-                        logger.error(f'Access forbidden (403). May lack permissions for private repo.')
-                        logger.info('Ensure PAT has been granted access to the specific repository.')
-                        return False
-
-                    else:
+                    if resp.status != 200:
                         logger.error(f'Failed to fetch character CSV: HTTP {resp.status}')
                         return False
+
+                    content = await resp.text(encoding='utf-8')
+                    lines = content.splitlines()
+
+                    if not lines:
+                        return False
+
+                    self.char_data = self._parse_char_csv_rows(csv.reader(lines))
+                    self.char_data_loaded = True
+                    logger.info(f'Loaded {len(self.char_data)} characters from remote CSV')
+                    metrics.record_db_load()
+                    return True
 
             except Exception as e:
                 logger.error(f'Error fetching character CSV: {type(e).__name__}: {e}')
@@ -2878,7 +2798,6 @@ async def health_cmd(interaction: discord.Interaction):
     embed.add_field(name='Uptime', value=metrics.get_uptime(), inline=True)
     embed.add_field(name='Cache Size', value=f'{search_cache.get_size()} entries', inline=True)
     embed.add_field(name='Last DB Load', value=metrics.last_db_load_time or 'N/A', inline=True)
-    embed.add_field(name='GitHub Auth', value='✅ Configured' if CFG.github_token else '❌ Not Set', inline=True)
 
     if dm.episodes_source == SourceType.CSV:
         episode_label = 'Episodes (from CSV)'
@@ -2916,80 +2835,6 @@ async def health_cmd(interaction: discord.Interaction):
 
     embed.set_footer(text=f'Bot v{BOT_VERSION} | Source: {dm.current_source["name"]}')
     await interaction.response.send_message(embed=embed)
-
-# ============================================
-# GITHUB AUTHENTICATION TEST COMMAND
-# ============================================
-
-@bot.tree.command(name='github_auth_test', description='Test GitHub authentication for private repositories')
-@admin_only()
-@rate_limited('github_auth_test', limit=2)
-async def github_auth_test_cmd(interaction: discord.Interaction):
-    """Test whether GitHub authentication is working for private repos."""
-    await interaction.response.defer()
-
-    embed = Embed(title='GitHub Authentication Test', color=CFG.color_primary)
-    embed.timestamp = utc_now()
-
-    has_token = bool(CFG.github_token)
-    embed.add_field(name='PAT Configured',
-                   value='✅ Yes' if has_token else '❌ No',
-                   inline=True)
-
-    if has_token:
-        embed.add_field(name='Token Format',
-                       value='✅ Valid' if CFG._validate_github_token_format() else '⚠️ Unusual',
-                       inline=True)
-
-    # Test API access if possible
-    if AIOHTTP_AVAILABLE and has_token:
-        try:
-            session = await dm.get_session()
-            if session:
-                async with session.get('https://api.github.com/user') as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        username = data.get('login', 'Unknown')
-                        remaining = resp.headers.get('X-RateLimit-Remaining', 'Unknown')
-                        embed.add_field(name='API Status',
-                                       value=f'✅ Working as @{username} | Rate limit: {remaining}',
-                                       inline=False)
-                    elif resp.status == 401:
-                        embed.add_field(name='API Status',
-                                       value='❌ Invalid token (401 - check expiration)',
-                                       inline=False)
-                    else:
-                        embed.add_field(name='API Status',
-                                       value=f'⚠️ Unexpected status code: {resp.status}',
-                                       inline=False)
-        except Exception as e:
-            embed.add_field(name='API Status',
-                           value=f'❌ Error: {type(e).__name__}: {str(e)[:100]}',
-                           inline=False)
-    else:
-        embed.add_field(name='API Status',
-                       value='⚠️ Cannot test (needs aiohttp + token)',
-                       inline=False)
-
-    # Setup instructions
-    if not has_token:
-        safe_add_field(embed, name='Setup Steps',
-                      value='1. Create PAT: https://github.com/settings/tokens\n'
-                            '2. Select scopes: `repo` (Full control of private repos)\n'
-                            '3. Copy the token\n'
-                            '4. Set env var: `GITHUB_PAT=ghp_your_token_here`\n'
-                            '5. Restart the bot',
-                      inline=False)
-    else:
-        safe_add_field(embed, name='Verification Tips',
-                      value='• Token is configured ✓\n'
-                            '• Check expiration date in GitHub settings\n'
-                            '• Fine-grained PATs need explicit repo access granted\n'
-                            '• Monitor rate limits in response headers\n'
-                            '• Revoke if exposed accidentally',
-                      inline=False)
-
-    await interaction.followup.send(embed=embed)
 
 # ============================================
 # SEARCH COMMAND
@@ -4559,4 +4404,3 @@ if __name__ == '__main__':
         logger.critical(f'Fatal error starting bot: {type(e).__name__}: {e}')
         logger.error('Check your DISCORD_TOKEN and permissions.')
         sys.exit(1)
-
