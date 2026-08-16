@@ -49,6 +49,7 @@ from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any, Callable, Set, Iterable
+import subprocess  # NEW: For git clone
 from enum import Enum
 
 import discord
@@ -2372,6 +2373,36 @@ class ResultSelectView(ui.View):
             pass
 
 # ============================================
+# CSV REPO CLONE HELPER (NEW)
+# ============================================
+
+async def ensure_csv_repo():
+    """Clone CSV repository locally if not present (for Render deployment)."""
+    csv_parent_dir = Path.home() / 'Doraemon-CSV-DB'
+    
+    if not csv_parent_dir.exists():
+        logger.info(f'Cloning CSV repository to {csv_parent_dir}...')
+        try:
+            result = subprocess.run([
+                'git', 'clone',
+                'https://github.com/star884/Doraemon-CSV-DB.git',
+                str(csv_parent_dir)
+            ], check=True, capture_output=True, text=True, timeout=120)
+            logger.info('✓ CSV repository cloned successfully')
+            logger.debug(f'Clone output: {result.stdout[:500]}')
+        except subprocess.TimeoutExpired:
+            logger.error('Git clone timed out after 120s')
+        except subprocess.CalledProcessError as e:
+            logger.error(f'Git clone failed: {e.stderr}')
+        except FileNotFoundError:
+            logger.error('Git is not installed on this system')
+        except Exception as e:
+            logger.exception(f'Unexpected error cloning CSV repo: {e}')
+    else:
+        logger.info(f'CSV repository already exists at {csv_parent_dir}')
+
+
+# ============================================
 # BOT SETUP
 # ============================================
 
@@ -4322,6 +4353,9 @@ async def on_ready():
 
     if bot.guilds:
         logger.info(f'Bot is in {len(bot.guilds)} guild(s)')
+
+    logger.info('\n=== Ensuring CSV Repository Exists ===')
+    await ensure_csv_repo()  # NEW: Clone CSV repo before loading databases
 
     logger.info('\n=== Loading Initial Databases (with fallback chain) ===')
 
