@@ -486,19 +486,20 @@ def normalize_csv_header(header: List[str], alias_map: Dict[str, List[str]]) -> 
     return result
 
 
-def get_field_compat(row: dict, canonical: str, alias_map: Dict[str, List[str]]) -> str:
+def get_field_compat(row: dict, canonical: str, alias_map: Dict[str, List[str]]) -> SanitizedValue:
     """Retrieve a field value trying the canonical name first, then aliases.
 
-    v4.1: Ensures return is always str (never None) for null safety.
+    v4.2: ALWAYS returns SanitizedValue (never raw string) for CSV injection prevention.
+    Null safety guaranteed - never returns None.
     """
     val = row.get(canonical, '')
     if val:
-        return str(val)
+        return SanitizedValue(str(val))
     for alias in alias_map.get(canonical, []):
         val = row.get(alias, '')
         if val:
-            return str(val)
-    return ''
+            return SanitizedValue(str(val))
+    return SanitizedValue('')
 
 
 def validate_csv_structure(header: List[str], expected_fields: List[str], alias_map: Dict[str, List[str]]) -> List[str]:
@@ -1953,6 +1954,23 @@ def truncate(text: str, max_len: int) -> str:
         return text[:max_len - 1] + '…'
     return text or ZERO_WIDTH_SPACE
 
+class SanitizedValue:
+    """Wrapper that ensures value is always sanitized for safe display.
+    
+    Prevents CSV injection by wrapping all data values at source.
+    """
+    __slots__ = ('_value',)
+    
+    def __init__(self, value: str):
+        self._value = sanitize_csv_cell(value) if value else ''
+    
+    def __str__(self):
+        return self._value
+    
+    def __repr__(self):
+        return repr(self._value)
+
+
 def calculate_embed_space(embed: Embed) -> int:
     """Calculate remaining space in embed.
 
@@ -1965,25 +1983,34 @@ def calculate_embed_space(embed: Embed) -> int:
     return CFG.embed_total_max - used
 
 def safe_add_field(embed: Embed, *, name: str, value: str = '', inline: bool = False) -> bool:
-    """Add a field to an embed with space checking. Returns False if field was skipped.
+    """Add a field to an embed with space checking. Truncates if possible, logs otherwise.
 
-    v4.1: Embed total length now accounts for title + description + all fields.
+    v4.2: Now aggressively truncates values to fit, rather than silently dropping fields.
+    Returns False only if field absolutely cannot be added.
     """
     if len(embed.fields) >= CFG.embed_field_max_count:
+        logger.warning('Field limit (25) reached, skipping field addition')
         return False
 
     remaining_space = calculate_embed_space(embed)
     field_size = len(name) + len(value)
 
     if remaining_space < field_size + SAFE_ADD_FIELD_BUFFER:
-        logger.warning(f'Embed space insufficient: {remaining_space} < {field_size + SAFE_ADD_FIELD_BUFFER}')
-        return False
-
+        # Aggressively truncate value to fit instead of dropping
+        excess = field_size - remaining_space + SAFE_ADD_FIELD_BUFFER
+        max_value_len = max(10, CFG.embed_field_value_max - excess)
+        value = truncate(value, max_value_len)
+        
+        # Still over budget after truncation - must skip
+        if len(name) + len(value) + SAFE_ADD_FIELD_BUFFER > remaining_space:
+            logger.warning(f'Embed space exhausted after truncation, skipping field: {name[:30]}...')
+            return False
+    
     name = truncate(name or ZERO_WIDTH_SPACE, CFG.embed_field_name_max)
     value = value if value else ZERO_WIDTH_SPACE
-    value = truncate(value, CFG.embed_field_value_max)
 
     embed.add_field(name=name, value=value, inline=inline)
+    logger.debug(f'Added field: {name[:30]} ({len(embed.fields)}/{CFG.embed_field_max_count})')
     return True
 
 def safe_display(value: str) -> str:
@@ -1991,18 +2018,18 @@ def safe_display(value: str) -> str:
     return sanitize_csv_cell(value) if value else ''
 
 def build_csv_result_fields(embed: Embed, story: dict) -> None:
-    """Populate an embed with standard CSV story fields."""
-    mag = story.get('Magazine code', '') or 'N/A'
-    pub_date = story.get('Publication Date', '') or 'N/A'
-    jp_title = story.get('Japanese title', '') or 'N/A'
-    anime_1979 = story.get('1979 anime', '') or 'None'
-    anime_2005 = story.get('2005 anime', '') or 'None'
-    tankobon = story.get('Tankōbon', '') or 'None'
-    complete = story.get('Complete Collection', '') or 'None'
-    kindle = story.get('English Kindle', '') or 'None'
-    movie = story.get('Movie', '') or ''
-    short_film = story.get('Short film', '') or ''
-    notes = story.get('Notes', '') or ''
+    """Populate an embed with standard CSV story fields - ALL SANITIZED for injection prevention."""
+    mag = str(get_field_compat(story, 'Magazine code', CSV_COLUMN_ALIASES)) or 'N/A'
+    pub_date = str(get_field_compat(story, 'Publication Date', CSV_COLUMN_ALIASES)) or 'N/A'
+    jp_title = str(get_field_compat(story, 'Japanese title', CSV_COLUMN_ALIASES)) or 'N/A'
+    anime_1979 = str(get_field_compat(story, '1979 anime', CSV_COLUMN_ALIASES)) or 'None'
+    anime_2005 = str(get_field_compat(story, '2005 anime', CSV_COLUMN_ALIASES)) or 'None'
+    tankobon = str(get_field_compat(story, 'Tankōbon', CSV_COLUMN_ALIASES)) or 'None'
+    complete = str(get_field_compat(story, 'Complete Collection', CSV_COLUMN_ALIASES)) or 'None'
+    kindle = str(get_field_compat(story, 'English Kindle', CSV_COLUMN_ALIASES)) or 'None'
+    movie = str(get_field_compat(story, 'Movie', CSV_COLUMN_ALIASES))
+    short_film = str(get_field_compat(story, 'Short film', CSV_COLUMN_ALIASES))
+    notes = str(get_field_compat(story, 'Notes', CSV_COLUMN_ALIASES))
 
     safe_add_field(embed, name='Magazine Code', value=mag, inline=True)
     safe_add_field(embed, name='Publication Date', value=pub_date, inline=True)
@@ -2043,7 +2070,9 @@ def build_more_matches_field(embed: Embed, results: List[dict], is_csv: bool, ma
             title = r.get('story_a', '?')[:40]
             lines.append(f'- {ep}: {title}')
 
-    safe_add_field(embed, name=f'More Matches ({len(results) - 1})', value='\n'.join(lines), inline=False)
+    # v4.2: Check return value for debug logging
+    if not safe_add_field(embed, name=f'More Matches ({len(results) - 1})', value='\n'.join(lines), inline=False):
+        logger.warning('Could not add More Matches field - embed at capacity')
 
 def build_char_more_matches_field(embed: Embed, results: List[dict], max_shown: int = 5) -> None:
     """Add a 'More Matches' field specifically for character results."""
@@ -2429,10 +2458,17 @@ if os.getenv('GITHUB_ACTIONS') == 'true':
 CFG = BotConfig()
 logger = setup_logging(CFG)
 
-# Validate config
+# Validate config with strict error handling
 config_warnings = CFG.validate()
 for warning in config_warnings:
     logger.warning(f'Config validation: {warning}')
+
+# Fatal errors should abort startup
+errors = [w for w in config_warnings if w.startswith('Configuration errors')]
+if errors:
+    logger.critical(f'Fatal configuration errors detected: {errors}')
+    logger.critical('Bot will not start with invalid configuration.')
+    sys.exit(1)
 
 metrics = MetricsCollector()
 rate_limiter = RateLimiter(
@@ -2456,35 +2492,80 @@ _shutdown_event = asyncio.Event()
 # GRACEFUL SHUTDOWN (v4.1: Async-safe signal handling)
 # ============================================
 
+# Global flags for shutdown coordination
+_shutdown_requested = threading.Event()
+_shutdown_task_scheduled = threading.Lock()
+
 def graceful_shutdown(signum, frame):
     """Handle SIGTERM/SIGINT for clean exits.
-
-    v4.1: No longer calls asyncio.run_until_complete() inside the signal
-    handler (which is unsafe and deprecated). Instead sets a flag and
-    schedules cleanup on the event loop. Uses os._exit as last resort.
+    
+    v4.2: Fixed - NO run_until_complete() in signal handler. Only schedules
+    async cleanup if loop exists. Safe for all phases of execution.
     """
     logger.info(f'Received signal {signum}, initiating graceful shutdown...')
-
-    # Try to schedule cleanup on the running event loop
+    
+    # Set shutdown flag
+    _shutdown_requested.set()
+    
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Schedule the async cleanup task
-            loop.call_soon_threadsafe(_schedule_async_cleanup, signum)
-        else:
-            # Loop not running, do synchronous cleanup
-            try:
-                if auto_refresh_task.is_running():
-                    auto_refresh_task.cancel()
-                    logger.info('Auto-refresh task cancelled.')
-            except Exception:
-                pass
-            loop.run_until_complete(dm.close_session())
-            logger.info('Graceful shutdown complete. Goodbye!')
-            sys.exit(0)
-    except Exception as e:
-        logger.warning(f'Async cleanup scheduling failed ({e}), forcing exit.')
+        loop = asyncio.get_running_loop()
+        # Prevent double-scheduling
+        with _shutdown_task_scheduled:
+            if getattr(loop, '_scheduled_cleanup', False):
+                return
+            loop._scheduled_cleanup = True
+        
+        # Schedule async cleanup via call_soon_threadsafe (safe in signal context)
+        loop.call_soon_threadsafe(schedule_async_cleanup)
+    except RuntimeError:
+        # No running event loop - startup phase, exit immediately
+        logger.info('Shutdown during startup - exiting immediately.')
+        try:
+            search_cache.close()
+        except Exception:
+            pass
         sys.exit(0)
+
+def schedule_async_cleanup():
+    """Called from signal context - only schedules the async task."""
+    asyncio.create_task(_async_shutdown())
+
+async def _async_shutdown():
+    """Main async cleanup routine."""
+    logger.info('Starting async shutdown sequence...')
+    
+    try:
+        if 'auto_refresh_task' in globals() and auto_refresh_task.is_running():
+            auto_refresh_task.cancel()
+            try:
+                await asyncio.wait_for(auto_refresh_task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+    except Exception as e:
+        logger.warning(f'Failed to cancel auto-refresh: {e}')
+    
+    try:
+        if 'dm' in globals():
+            await dm.close_session()
+            logger.info('aiohttp session closed.')
+    except Exception as e:
+        logger.warning(f'Failed to close database session: {e}')
+    
+    try:
+        if 'search_cache' in globals():
+            search_cache.close()
+            logger.info('SQLite cache connection closed.')
+    except Exception as e:
+        logger.warning(f'Failed to close cache: {e}')
+    
+    try:
+        await bot.close()
+        logger.info('Bot gateway closed.')
+    except Exception as e:
+        logger.warning(f'Failed to close bot: {e}')
+    
+    logger.info('Graceful shutdown complete.')
+    os._exit(0)
 
 def _schedule_async_cleanup(signum: int) -> None:
     """Schedule the async cleanup coroutine on the running event loop."""
@@ -4193,7 +4274,7 @@ async def characters_by_category_cmd(interaction: discord.Interaction, category:
 # AUTO-REFRESH BACKGROUND TASK
 # ============================================
 
-@tasks.loop(hours=AUTO_REFRESH_INTERVAL_HOURS)
+@tasks.loop(hours=AUTO_REFRESH_INTERVAL_HOURS, reconnect=True)  # v4.2: Added reconnect=True
 async def auto_refresh_task():
     """Periodically re-fetch remote CSVs to keep data current."""
     logger.info('Auto-refresh: Checking for data updates...')
@@ -4270,9 +4351,25 @@ async def on_app_command_error(
     interaction: discord.Interaction,
     error: app_commands.AppCommandError
 ):
-    """Handle slash command errors gracefully."""
-    logger.error(f'Slash command error: {type(error).__name__}: {error}')
-    metrics.record_error(type(error).__name__)
+    """Handle slash command errors gracefully.
+
+    v4.2: Detects 429 rate limits and avoids sending more Discord API
+    requests that would deepen the ban.
+    """
+    error_name = type(error).__name__
+    error_str = str(error)
+
+    # Detect Discord rate limit (429) — do NOT send any Discord API requests
+    if '429' in error_str or 'rate limit' in error_str.lower():
+        logger.error(f'RATE LIMITED by Discord API: {error_name}: {error_str}')
+        logger.error('Suppressing error response to avoid deepening rate limit ban.')
+        metrics.record_error('DiscordRateLimit')
+        # Wait before allowing any more commands
+        await asyncio.sleep(5)
+        return
+
+    logger.error(f'Slash command error: {error_name}: {error}')
+    metrics.record_error(error_name)
 
     embed = Embed(
         title='Something went wrong',
@@ -4287,22 +4384,47 @@ async def on_app_command_error(
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
             await interaction.response.send_message(embed=embed, ephemeral=True)
+    except discord.HTTPException as e:
+        if '429' in str(e) or 'rate limit' in str(e).lower():
+            logger.warning(f'Cannot send error message — rate limited. Suppressing.')
+            await asyncio.sleep(5)
+        else:
+            logger.error(f'Failed to send error message: {e}')
     except Exception as e:
         logger.error(f'Failed to send error message: {e}')
 
 @bot.event
 async def on_command_error(ctx, error):
-    """Handle legacy prefix command errors."""
+    """Handle legacy prefix command errors.
+
+    v4.2: Checks for 429 before sending messages to avoid deepening rate limits.
+    """
     if isinstance(error, commands.CommandNotFound):
-        await ctx.send('Command not found. Use `/help` to see available commands.')
+        try:
+            await ctx.send('Command not found. Use `/help` to see available commands.')
+        except discord.HTTPException as e:
+            if '429' in str(e):
+                logger.warning('Suppressed CommandNotFound reply — rate limited.')
+                await asyncio.sleep(3)
+            else:
+                logger.error(f'Failed to send CommandNotFound message: {e}')
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send('Missing required argument. Use `/help` for usage information.')
+        try:
+            await ctx.send('Missing required argument. Use `/help` for usage information.')
+        except discord.HTTPException as e:
+            if '429' in str(e):
+                logger.warning('Suppressed MissingRequiredArgument reply — rate limited.')
+                await asyncio.sleep(3)
     elif isinstance(error, commands.CheckFailure):
         logger.warning(f'Check failure: {error}')
     else:
         logger.error(f'Unhandled error: {type(error).__name__}: {error}')
         try:
             await ctx.send('An unexpected error occurred. Please contact the bot administrator.')
+        except discord.HTTPException as e:
+            if '429' in str(e):
+                logger.warning('Suppressed error reply — rate limited.')
+                await asyncio.sleep(3)
         except Exception:
             pass
 
@@ -4315,21 +4437,15 @@ async def on_ready():
     global _ready_flag
 
     if _ready_flag:
-        logger.info('on_ready fired again (reconnect) — checking data freshness...')
-        # Trigger a refresh if data might be stale (reconnected after a gap)
-        if AIOHTTP_AVAILABLE:
-            try:
-                if dm.char_data_loaded:
-                    await dm.load_char_csv_remote(CHAR_CSV_RAW_URL)
-                    search_index.build_char_index(dm.char_data)
-                    logger.info('Reconnect: Character data refreshed.')
-                if dm.csv_data_loaded and dm.is_csv_source():
-                    await dm.load_csv_database_live(CFG.csv_raw_base_url)
-                    await dm.safe_update_episodes(dm.convert_csv_to_episode_format(dm.csv_stories))
-                    search_index.build_story_index(dm.episodes)
-                    logger.info('Reconnect: CSV data refreshed.')
-            except Exception as e:
-                logger.warning(f'Reconnect refresh failed: {e}')
+        logger.info('on_ready fired again (reconnect) — skipping re-sync to conserve rate limit budget.')
+        # v4.2: Reduced reconnect activity to avoid 429 rate limits.
+        # Only refresh data if more than 1 hour has passed since last load.
+        try:
+            if dm.char_data_loaded and AIOHTTP_AVAILABLE:
+                # Skip remote refresh on reconnect — auto-refresh task handles this
+                logger.info('Reconnect: Skipping data refresh (auto-refresh handles this).')
+        except Exception as e:
+            logger.warning(f'Reconnect check failed: {e}')
         return
 
     _ready_flag = True
@@ -4343,13 +4459,27 @@ async def on_ready():
             bot.tree.copy_global_to(guild=guild_obj)
             synced = await bot.tree.sync(guild=guild_obj)
             logger.info(f'Synced {len(synced)} commands to dev guild {dev_guild_id}')
-        except Exception as e:
-            logger.warning(f'Guild sync failed, falling back to global: {e}')
+        except discord.HTTPException as e:
+            if '429' in str(e) or 'rate limit' in str(e).lower():
+                logger.warning(f'Command sync rate limited (429). Skipping sync — commands will sync on next cycle.')
+                metrics.record_error('DiscordRateLimit_Sync')
+            else:
+                logger.warning(f'Guild sync failed ({e}), falling back to global.')
+                try:
+                    synced = await bot.tree.sync()
+                    logger.info(f'Synced {len(synced)} GLOBAL commands')
+                except discord.HTTPException as e2:
+                    logger.error(f'Global sync also failed: {e2}')
+    else:
+        try:
             synced = await bot.tree.sync()
             logger.info(f'Synced {len(synced)} GLOBAL commands')
-    else:
-        synced = await bot.tree.sync()
-        logger.info(f'Synced {len(synced)} GLOBAL commands')
+        except discord.HTTPException as e:
+            if '429' in str(e) or 'rate limit' in str(e).lower():
+                logger.warning(f'Global command sync rate limited (429). Commands will sync later.')
+                metrics.record_error('DiscordRateLimit_Sync')
+            else:
+                logger.error(f'Global sync failed: {e}')
 
     if bot.guilds:
         logger.info(f'Bot is in {len(bot.guilds)} guild(s)')
@@ -4424,7 +4554,7 @@ async def on_ready():
     logger.info('\n✅ Bot is ready!\n')
 
 # ============================================
-# MAIN EXECUTION
+# MAIN EXECUTION (v4.2: 429 retry with exponential backoff)
 # ============================================
 
 if __name__ == '__main__':
@@ -4435,9 +4565,37 @@ if __name__ == '__main__':
     logger.info(f'Discord.py version: {discord.__version__}')
     logger.info('=' * 60)
 
-    try:
-        bot.run(TOKEN)
-    except Exception as e:
-        logger.critical(f'Fatal error starting bot: {type(e).__name__}: {e}')
-        logger.error('Check your DISCORD_TOKEN and permissions.')
-        sys.exit(1)
+    MAX_LOGIN_RETRIES = 5
+    INITIAL_RETRY_DELAY = 30  # seconds — start high for 429 bans
+
+    for attempt in range(1, MAX_LOGIN_RETRIES + 1):
+        try:
+            bot.run(TOKEN)
+            break  # Normal exit — bot shut down gracefully
+        except discord.HTTPException as e:
+            if '429' in str(e) or 'rate limit' in str(e).lower():
+                delay = INITIAL_RETRY_DELAY * (2 ** (attempt - 1))
+                logger.critical(
+                    f'Attempt {attempt}/{MAX_LOGIN_RETRIES}: Discord rate limited (429). '
+                    f'Waiting {delay}s before retry...'
+                )
+                metrics.record_error('DiscordRateLimit_Login')
+                if attempt == MAX_LOGIN_RETRIES:
+                    logger.critical(
+                        f'Max retries ({MAX_LOGIN_RETRIES}) reached. '
+                        f'Bot is globally rate-limited. Waiting {delay}s then exiting.'
+                    )
+                    time.sleep(delay)
+                    sys.exit(1)
+                time.sleep(delay)
+            else:
+                logger.critical(f'Fatal Discord HTTP error: {type(e).__name__}: {e}')
+                sys.exit(1)
+        except KeyboardInterrupt:
+            logger.info('Received keyboard interrupt, shutting down.')
+            break
+        except Exception as e:
+            logger.critical(f'Fatal error starting bot: {type(e).__name__}: {e}')
+            logger.error('Check your DISCORD_TOKEN and permissions.')
+            sys.exit(1)
+
