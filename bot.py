@@ -489,16 +489,18 @@ def normalize_csv_header(header: List[str], alias_map: Dict[str, List[str]]) -> 
 def get_field_compat(row: dict, canonical: str, alias_map: Dict[str, List[str]]) -> SanitizedValue:
     """Retrieve a field value trying the canonical name first, then aliases.
 
-    v4.2: ALWAYS returns SanitizedValue (never raw string) for CSV injection prevention.
+    v4.2: Returns SanitizedValue (str subclass) for CSV injection prevention.
     Null safety guaranteed - never returns None.
+    Since SanitizedValue inherits str, all string methods work natively.
+    Also fixes truthiness: empty values are now falsy (enables 'or' fallbacks).
     """
     val = row.get(canonical, '')
     if val:
-        return SanitizedValue(str(val))
+        return SanitizedValue(val)  # SanitizedValue handles sanitization internally
     for alias in alias_map.get(canonical, []):
         val = row.get(alias, '')
         if val:
-            return SanitizedValue(str(val))
+            return SanitizedValue(val)
     return SanitizedValue('')
 
 
@@ -1954,21 +1956,22 @@ def truncate(text: str, max_len: int) -> str:
         return text[:max_len - 1] + '…'
     return text or ZERO_WIDTH_SPACE
 
-class SanitizedValue:
-    """Wrapper that ensures value is always sanitized for safe display.
+class SanitizedValue(str):
+    """Subclass of str that ensures value is always sanitized for safe display.
     
-    Prevents CSV injection by wrapping all data values at source.
+    Prevents CSV injection by sanitizing all data values at source.
+    Inherits all str methods (.lower(), .strip(), .upper(), etc.) automatically.
+    Also fixes truthiness: empty SanitizedValue is now falsy (like empty str).
     """
-    __slots__ = ('_value',)
+    __slots__ = ()  # No instance attributes - value IS the string
     
-    def __init__(self, value: str):
-        self._value = sanitize_csv_cell(value) if value else ''
-    
-    def __str__(self):
-        return self._value
+    def __new__(cls, value: str):
+        """Create a new SanitizedValue instance with sanitized content."""
+        sanitized = sanitize_csv_cell(value) if value else ''
+        return super().__new__(cls, sanitized)
     
     def __repr__(self):
-        return repr(self._value)
+        return repr(str(self))
 
 
 def calculate_embed_space(embed: Embed) -> int:
