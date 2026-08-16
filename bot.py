@@ -1901,48 +1901,71 @@ class DatabaseManager:
 
         logger.warning('All CSV sources failed. Database will be empty.')
 
-    async def cross_source_search(self, query: str) -> Dict[str, List[dict]]:
+    async def cross_source_search(self, query: str) -> Dict[str, Tuple[List[dict], str]]:
         """Search across all loaded sources simultaneously.
 
         v4.1: Added deduplication by title+date to prevent the same story
         appearing from both JSON and CSV sources.
+        v4.2: Returns explicit source names for clearer dropdown labeling;
+        removed cross-source dedup to allow per-source result independence.
         """
-        results: Dict[str, List[dict]] = {}
+        results: Dict[str, Tuple[List[dict], str]] = {}
         q = query.lower().strip()
-        seen_keys: Set[str] = set()
 
-        def _dedup_key(item: dict) -> str:
-            """Generate a dedup key from title + publication date."""
-            title = (item.get('English title', '') or item.get('story_a', '') or '').lower().strip()
-            date = (item.get('Publication Date', '') or '').lower().strip()
-            return f"{title}|{date}"
-
+        # ──────────────────────────────────────────────────────────────
+        # Characters CSV (Sources 3 & 4)
+        # ──────────────────────────────────────────────────────────────
         if self.char_data_loaded and self.char_data:
             char_results = search_characters(q, self.char_data, use_word_boundary=True, use_fuzzy=True)
             if char_results:
-                results['characters'] = char_results
+                # Determine character source ID
+                char_source_id = None
+                for src in self.available_sources:
+                    if src.source_type == SourceType.CSV_CHAR and src.id in [3, 4]:
+                        if src.id == 3:
+                            char_source_id = 3
+                            break
+                        elif src.id == 4:
+                            char_source_id = 4
+                            break
+                
+                source_name = f'Characters (Source {char_source_id})' if char_source_id else 'Characters'
+                results[f'characters_{char_source_id or "chars"}'] = (char_results, source_name)
 
+        # ──────────────────────────────────────────────────────────────
+        # Manga CSV (Source 2) - NO CROSS-SOURCE DEDUP!
+        # ──────────────────────────────────────────────────────────────
         if self.csv_data_loaded and self.csv_stories:
             story_hits = search_stories(q, self.episodes, csv_mode=True)
             if story_hits:
+                # INTRA-Source dedup only (within CSV itself)
+                seen_csv: Set[str] = set()
                 deduped = []
                 for item in story_hits:
-                    k = _dedup_key(item)
-                    if k not in seen_keys:
-                        seen_keys.add(k)
+                    k = f"{(item.get('English title', '') or item.get('story_a', '') or '').lower()}|{(item.get('Publication Date', '') or '').lower()}"
+                    if k not in seen_csv:
+                        seen_csv.add(k)
                         deduped.append(item)
-                results['manga_stories'] = deduped
+                if deduped:
+                    results['manga_csv_2'] = (deduped, 'Manga CSV (Source 2)')
 
-        if self.episodes and not self.is_csv_source() and not self.is_char_source():
+        # ──────────────────────────────────────────────────────────────
+        # JSON Episodes (Source 1) - NO CROSS-SOURCE DEDUP!
+        # ──────────────────────────────────────────────────────────────
+        # REMOVED the "not self.is_csv_source()" check - always search JSON if loaded
+        if self.episodes and self.episodes_source == SourceType.JSON:
             json_hits = search_stories(q, self.episodes, csv_mode=False)
             if json_hits:
+                # INTRA-Source dedup only (within JSON itself)
+                seen_json: Set[str] = set()
                 deduped = []
                 for item in json_hits:
-                    k = _dedup_key(item)
-                    if k not in seen_keys:
-                        seen_keys.add(k)
+                    k = f"{(item.get('English title', '') or item.get('story_a', '') or '').lower()}|{(item.get('Publication Date', '') or '').lower()}"
+                    if k not in seen_json:
+                        seen_json.add(k)
                         deduped.append(item)
-                results['episodes'] = deduped
+                if deduped:
+                    results['episodes_1'] = (deduped, 'JSON Episodes (Source 1)')
 
         return results
 
@@ -3197,23 +3220,24 @@ async def search_all_cmd(interaction: discord.Interaction, query: str):
     embed.timestamp = utc_now()
     total = 0
 
-    for source_name, source_results in results.items():
+    # Build description listing ALL sources with counts
+    source_descriptions = []
+    for result_key, (source_results, source_display_name) in results.items():
         total += len(source_results)
         first = source_results[0]
-        if source_name == 'characters':
-            label = 'Characters'
+        
+        # Build per-source preview for description
+        if result_key.startswith('characters'):
             preview = f'{first.get("Character Name", "?")} [{first.get("Category", "?")}]'
-        elif source_name == 'manga_stories':
-            label = 'Manga Stories'
+        elif result_key.startswith('manga_csv'):
             preview = (first.get('English title', '') or first.get('story_a', '?'))[:60]
-        else:
-            label = 'Episodes'
+        else:  # episodes
             preview = (first.get('story_a', '?') or '')[:60]
-        safe_add_field(embed, name=f'{label} ({len(source_results)} match(es))',
-                       value=preview, inline=False)
+        
+        source_descriptions.append(f'• **{source_display_name}**: {len(source_results)} matches')
 
-    embed.description = f'Found **{total}** total results across {len(results)} source(s)'
-    embed.set_footer(text=f'Use the dropdown(s) below to browse all results | Source: All')
+    embed.description = '\n'.join(source_descriptions) + '\n\n*Use the dropdowns below to browse each source separately*'
+    embed.set_footer(text=f'Total: {total} matches | {len(results)} sources')
 
     view = CrossSourceSelectView(results, original_user_id=interaction.user.id)
     await interaction.followup.send(embed=embed, view=view)
@@ -4314,25 +4338,28 @@ async def auto_refresh_before():
     await bot.wait_until_ready()
 
 class CrossSourceSelectView(ui.View):
-    """View with multiple dropdown menus — one per source type."""
+    """View with multiple dropdown menus — one per source type with explicit source IDs."""
 
-    def __init__(self, results: Dict[str, List[dict]], original_user_id: Optional[int] = None):
+    def __init__(self, results: Dict[str, Tuple[List[dict], str]], original_user_id: Optional[int] = None):
         super().__init__(timeout=CFG.view_timeout_seconds)
         self.original_user_id = original_user_id
         self.message = None
 
-        source_map: Dict[str, str] = {
-            'characters':    SourceType.CSV_CHAR.value,
-            'manga_stories': SourceType.CSV.value,
-            'episodes':      'json',
+        # Map result keys to source types
+        source_type_map: Dict[str, str] = {
+            'characters_3':    SourceType.CSV_CHAR.value,
+            'characters_4':    SourceType.CSV_CHAR.value,
+            'characters_chars': SourceType.CSV_CHAR.value,
+            'manga_csv_2':     SourceType.CSV.value,
+            'episodes_1':      SourceType.JSON.value,
         }
 
-        for source_name, source_results in results.items():
-            source_type = source_map.get(source_name, 'json')
+        for result_key, (source_results, source_display_name) in results.items():
+            source_type = source_type_map.get(result_key, SourceType.JSON.value)
             menu = ResultSelectMenu(source_results[:25], source_type)
-
-            label_display = source_name.replace('_', ' ').title()
-            menu.placeholder = f'Browse {label_display} ({len(source_results)} match(es))...'
+            
+            # Use the explicit source display name passed from cross_source_search
+            menu.placeholder = f'Browse {source_display_name} ({len(source_results)} match(es))...'
 
             self.add_item(menu)
 
