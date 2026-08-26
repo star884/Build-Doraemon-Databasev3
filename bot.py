@@ -2570,56 +2570,6 @@ def schedule_async_cleanup():
     """Called from signal context - only schedules the async task."""
     asyncio.create_task(_async_shutdown())
 
-async def _async_shutdown():
-    """Main async cleanup routine."""
-    logger.info('Starting async shutdown sequence...')
-    
-    try:
-        if 'auto_refresh_task' in globals() and auto_refresh_task.is_running():
-            auto_refresh_task.cancel()
-            try:
-                await asyncio.wait_for(auto_refresh_task, timeout=2.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
-    except Exception as e:
-        logger.warning(f'Failed to cancel auto-refresh: {e}')
-    
-    try:
-        if 'dm' in globals():
-            await dm.close_session()
-            logger.info('aiohttp session closed.')
-    except Exception as e:
-        logger.warning(f'Failed to close database session: {e}')
-    
-    try:
-        if 'search_cache' in globals():
-            search_cache.close()
-            logger.info('SQLite cache connection closed.')
-    except Exception as e:
-        logger.warning(f'Failed to close cache: {e}')
-    
-        try:
-        if image_database is not None:
-            await image_database.close()
-            logger.info('Character image database client closed.')
-    except Exception as e:
-        logger.warning(
-            f'Failed to close character image database client: {e}'
-        )
-
-    try:
-        await bot.close()
-        logger.info('Bot gateway closed.')
-    except Exception as e:
-        logger.warning(f'Failed to close bot: {e}')
-    
-    logger.info('Graceful shutdown complete.')
-    os._exit(0)
-
-def _schedule_async_cleanup(signum: int) -> None:
-    """Schedule the async cleanup coroutine on the running event loop."""
-    asyncio.ensure_future(_async_shutdown())
-
 async def _async_shutdown() -> None:
     """Perform async cleanup: cancel background task, close session, close bot, then exit."""
     logger.info('Starting async shutdown sequence...')
@@ -2901,9 +2851,7 @@ class CharacterImageView(ui.View):
         await self._refresh(interaction)
 
     async def on_timeout(self) -> None:
-
         for child in self.children:
-
             if isinstance(child, ui.Button):
                 child.disabled = True
 
@@ -2978,7 +2926,9 @@ async def gallery_cmd(
     )
 
     await interaction.followup.send(
-        embed=view.buil
+        embed=view.build_embed(),
+        view=view,
+    )
 
 @bot.tree.command(name='source', description='Shows the current database source')
 @rate_limited('source')
