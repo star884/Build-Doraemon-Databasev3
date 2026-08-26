@@ -1,29 +1,33 @@
+#!/usr/bin/env python3
+
 """
 Doraemon Image Database Client
 ==============================
 
 Runtime client for Build-Doraemon-Databasev3.
 
-The image-building process lives in the separate:
+The image-building process lives in:
 
     star884/Doraemon-Image-Database
 
-repository.
+This module is READ-ONLY.
 
-This module does NOT search for images.
+It does not:
+    - search Wikimedia
+    - search Wikipedia
+    - search Fandom
+    - download image files
+    - build the image database
 
-It does NOT download image files.
+It only:
 
-It does NOT contact Wikimedia, Wikipedia, Fandom, etc.
+    1. Downloads database/images.json
+    2. Caches the manifest
+    3. Resolves character names / aliases
+    4. Returns published GitHub image URLs
+    5. Provides image-database statistics
 
-It ONLY downloads the generated manifest from:
-
-    raw.githubusercontent.com
-
-and resolves characters to their published image URLs.
-
-This keeps the Discord bot lightweight and makes the image repository
-the single source of truth for character images.
+The image repository is the single source of truth.
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ logger = logging.getLogger(
 
 
 # ============================================================
-# Configuration
+# CONFIGURATION
 # ============================================================
 
 IMAGE_REPOSITORY_OWNER = os.getenv(
@@ -75,6 +79,11 @@ IMAGE_MANIFEST_URL = (
     f"{IMAGE_MANIFEST_PATH}"
 )
 
+
+# ------------------------------------------------------------
+# Manifest cache
+# ------------------------------------------------------------
+
 MANIFEST_CACHE_SECONDS = max(
     30,
     int(
@@ -85,6 +94,11 @@ MANIFEST_CACHE_SECONDS = max(
     ),
 )
 
+
+# ------------------------------------------------------------
+# HTTP timeout
+# ------------------------------------------------------------
+
 HTTP_TIMEOUT_SECONDS = max(
     5,
     int(
@@ -94,6 +108,11 @@ HTTP_TIMEOUT_SECONDS = max(
         )
     ),
 )
+
+
+# ------------------------------------------------------------
+# Maximum images returned to the bot
+# ------------------------------------------------------------
 
 MAX_IMAGES_PER_GALLERY = max(
     1,
@@ -106,26 +125,87 @@ MAX_IMAGES_PER_GALLERY = max(
 )
 
 
+# ------------------------------------------------------------
+# Manifest request retries
+# ------------------------------------------------------------
+
+MANIFEST_RETRIES = max(
+    1,
+    int(
+        os.getenv(
+            "IMAGE_MANIFEST_RETRIES",
+            "4",
+        )
+    ),
+)
+
+
 # ============================================================
-# Data model
+# SUPPORTED MANIFEST SCHEMAS
+# ============================================================
+
+# Schema 2 was used by the original bot client.
+#
+# The new Doraemon image builder generates schema 5.
+#
+# The actual structure needed by this client is compatible
+# between these versions because it still contains:
+#
+#     manifest["characters"]
+#
+# and character entries still contain:
+#
+#     name
+#     aliases
+#     images
+#
+SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {
+        2,
+        3,
+        4,
+        5,
+    }
+)
+
+
+# ============================================================
+# DATA MODEL
 # ============================================================
 
 @dataclass(frozen=True)
 class DoraemonImage:
-    """One published character image."""
+    """
+    One published character image.
+    """
 
     image_id: str
+
     character_id: str
+
     character_name: str
+
     filename: str
+
     url: str
+
     width: int
+
     height: int
+
     source: str = ""
+
+    source_url: str = ""
+
+    format: str = ""
+
+    bytes: int = 0
+
+    sha256: str = ""
 
 
 # ============================================================
-# Normalization
+# NORMALIZATION
 # ============================================================
 
 def normalize_name(
@@ -133,6 +213,13 @@ def normalize_name(
 ) -> str:
     """
     Normalize names consistently with the image builder.
+
+    This intentionally mirrors the builder's normalization:
+
+        lower
+        ampersand -> "and"
+        remove apostrophes
+        non-alphanumeric runs -> "-"
     """
 
     value = str(
@@ -142,6 +229,17 @@ def normalize_name(
     value = value.replace(
         "&",
         " and ",
+    )
+
+    value = value.replace(
+        "’",
+        "'",
+    )
+
+    value = re.sub(
+        r"[’'`]",
+        "",
+        value,
     )
 
     value = re.sub(
@@ -160,17 +258,18 @@ def normalize_name(
 
 
 # ============================================================
-# Security boundary
+# IMAGE URL SECURITY
 # ============================================================
 
 def is_allowed_image_url(
     url: str,
 ) -> bool:
     """
-    The bot deliberately accepts ONLY raw GitHub URLs.
+    Accept only raw GitHub URLs belonging to the configured
+    image repository.
 
-    This prevents the manifest from silently turning into an
-    arbitrary remote-image proxy.
+    This prevents an accidental or malicious manifest entry
+    from turning the bot into an arbitrary remote-image proxy.
     """
 
     if not isinstance(
@@ -179,18 +278,30 @@ def is_allowed_image_url(
     ):
         return False
 
-    return url.startswith(
+    url = url.strip()
+
+    if not url:
+        return False
+
+    expected_prefix = (
         "https://raw.githubusercontent.com/"
+        f"{IMAGE_REPOSITORY_OWNER}/"
+        f"{IMAGE_REPOSITORY_NAME}/"
+        f"{IMAGE_REPOSITORY_BRANCH}/"
+    )
+
+    return url.startswith(
+        expected_prefix
     )
 
 
 # ============================================================
-# Client
+# CLIENT
 # ============================================================
 
 class DoraemonImageDatabase:
     """
-    Read-only client for Doraemon-Image-Database.
+    Read-only runtime client for Doraemon-Image-Database.
     """
 
     def __init__(
@@ -200,7 +311,9 @@ class DoraemonImageDatabase:
         cache_seconds: int = MANIFEST_CACHE_SECONDS,
     ) -> None:
 
-        self.manifest_url = manifest_url
+        self.manifest_url = (
+            manifest_url
+        )
 
         self.cache_seconds = max(
             30,
@@ -222,7 +335,7 @@ class DoraemonImageDatabase:
         self._lock = asyncio.Lock()
 
     # ========================================================
-    # HTTP session
+    # HTTP SESSION
     # ========================================================
 
     async def _session_get(
@@ -244,6 +357,7 @@ class DoraemonImageDatabase:
                 limit=10,
                 limit_per_host=5,
                 ttl_dns_cache=300,
+                enable_cleanup_closed=True,
             )
 
             self._session = (
@@ -253,10 +367,13 @@ class DoraemonImageDatabase:
                     headers={
                         "User-Agent": (
                             "Doraemon-Database/"
-                            "4.x Image Client"
+                            "5.x Image Client"
                         ),
                         "Accept": (
                             "application/json"
+                        ),
+                        "Cache-Control": (
+                            "no-cache"
                         ),
                     },
                 )
@@ -264,16 +381,93 @@ class DoraemonImageDatabase:
 
         return self._session
 
-    async def close(self) -> None:
+    # ========================================================
+    # CLOSE
+    # ========================================================
+
+    async def close(
+        self,
+    ) -> None:
 
         if self._session is not None:
 
-            await self._session.close()
-
-            self._session = None
+            try:
+                await self._session.close()
+            finally:
+                self._session = None
 
     # ========================================================
-    # Manifest download
+    # SCHEMA VALIDATION
+    # ========================================================
+
+    @staticmethod
+    def _validate_manifest(
+        payload: Any,
+    ) -> dict[str, Any]:
+
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            raise RuntimeError(
+                "Image manifest is not "
+                "a JSON object."
+            )
+
+        schema_version = payload.get(
+            "schema_version"
+        )
+
+        try:
+            schema_version_int = int(
+                schema_version
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            raise RuntimeError(
+                "Image manifest has an invalid "
+                "schema_version: "
+                f"{schema_version!r}"
+            )
+
+        if (
+            schema_version_int
+            not in SUPPORTED_SCHEMA_VERSIONS
+        ):
+
+            raise RuntimeError(
+                "Unsupported image database "
+                f"schema: {schema_version_int!r}. "
+                "Supported schemas: "
+                + ", ".join(
+                    str(value)
+                    for value in sorted(
+                        SUPPORTED_SCHEMA_VERSIONS
+                    )
+                )
+            )
+
+        characters = payload.get(
+            "characters"
+        )
+
+        if not isinstance(
+            characters,
+            dict,
+        ):
+
+            raise RuntimeError(
+                "Image manifest does not contain "
+                "a valid 'characters' object."
+            )
+
+        return payload
+
+    # ========================================================
+    # MANIFEST DOWNLOAD
     # ========================================================
 
     async def _download_manifest(
@@ -282,16 +476,37 @@ class DoraemonImageDatabase:
 
         session = await self._session_get()
 
-        last_error: Optional[
+        last_error: (
             Exception
-        ] = None
+            | None
+        ) = None
 
-        for attempt in range(3):
+        for attempt in range(
+            1,
+            MANIFEST_RETRIES + 1,
+        ):
 
             try:
 
+                # ------------------------------------------------
+                # Add a cache-busting query parameter.
+                #
+                # This is useful when force_refresh=True and GitHub
+                # raw content has recently changed.
+                # ------------------------------------------------
+
+                params = {
+                    "_ts": str(
+                        int(
+                            time.time()
+                        )
+                    )
+                }
+
                 async with session.get(
-                    self.manifest_url
+                    self.manifest_url,
+                    params=params,
+                    allow_redirects=True,
                 ) as response:
 
                     if response.status != 200:
@@ -307,47 +522,54 @@ class DoraemonImageDatabase:
                         )
                     )
 
-                    if not isinstance(
-                        payload,
-                        dict,
-                    ):
-                        raise RuntimeError(
-                            "Image manifest is not "
-                            "a JSON object."
-                        )
-
-                    schema_version = (
-                        payload.get(
-                            "schema_version"
+                    manifest = (
+                        self._validate_manifest(
+                            payload
                         )
                     )
 
-                    if schema_version != 2:
+                    logger.info(
+                        "Loaded Doraemon image "
+                        "manifest: schema=%s "
+                        "characters=%d",
+                        manifest.get(
+                            "schema_version"
+                        ),
+                        len(
+                            manifest.get(
+                                "characters",
+                                {},
+                            )
+                        ),
+                    )
 
-                        raise RuntimeError(
-                            "Unsupported image "
-                            f"database schema: "
-                            f"{schema_version!r}"
-                        )
+                    return manifest
 
-                    return payload
-
-            except Exception as exc:
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                RuntimeError,
+                ValueError,
+            ) as exc:
 
                 last_error = exc
 
                 logger.warning(
                     "Image manifest request "
-                    "attempt %d/3 failed: %s",
-                    attempt + 1,
+                    "attempt %d/%d failed: %s",
+                    attempt,
+                    MANIFEST_RETRIES,
                     exc,
                 )
 
-                if attempt < 2:
+                if attempt < MANIFEST_RETRIES:
 
+                    # Exponential but bounded retry delay.
                     await asyncio.sleep(
-                        1.5
-                        * (attempt + 1)
+                        min(
+                            8.0,
+                            1.5 * attempt,
+                        )
                     )
 
         raise RuntimeError(
@@ -356,7 +578,7 @@ class DoraemonImageDatabase:
         ) from last_error
 
     # ========================================================
-    # Cached manifest
+    # CACHED MANIFEST
     # ========================================================
 
     async def get_manifest(
@@ -393,9 +615,28 @@ class DoraemonImageDatabase:
 
                 return self._manifest
 
-            manifest = (
-                await self._download_manifest()
-            )
+            try:
+
+                manifest = (
+                    await self._download_manifest()
+                )
+
+            except Exception:
+
+                # If the bot already has a known-good cached
+                # manifest, do not destroy it merely because
+                # GitHub is temporarily unavailable.
+                if self._manifest is not None:
+
+                    logger.exception(
+                        "Unable to refresh image "
+                        "manifest; keeping the "
+                        "previous cached manifest."
+                    )
+
+                    return self._manifest
+
+                raise
 
             self._manifest = manifest
 
@@ -406,14 +647,33 @@ class DoraemonImageDatabase:
             return manifest
 
     # ========================================================
-    # Character resolution
+    # FORCE REFRESH
+    # ========================================================
+
+    async def refresh(
+        self,
+    ) -> dict[str, Any]:
+
+        """
+        Force a fresh download of database/images.json.
+        """
+
+        return await self.get_manifest(
+            force_refresh=True
+        )
+
+    # ========================================================
+    # EXACT CHARACTER LOOKUP
     # ========================================================
 
     async def find_character(
         self,
         query: str,
     ) -> Optional[
-        tuple[str, dict[str, Any]]
+        tuple[
+            str,
+            dict[str, Any],
+        ]
     ]:
 
         query_key = normalize_name(
@@ -439,7 +699,7 @@ class DoraemonImageDatabase:
             return None
 
         # ----------------------------------------------------
-        # Exact ID
+        # 1. Exact character ID
         # ----------------------------------------------------
 
         if query_key in characters:
@@ -452,16 +712,111 @@ class DoraemonImageDatabase:
                 data,
                 dict,
             ):
+
                 return (
                     query_key,
                     data,
                 )
 
         # ----------------------------------------------------
-        # Exact name / aliases
+        # 2. Generated search index
+        #
+        # The new image builder creates:
+        #
+        #     search_index.json
+        #
+        # but it is not required for compatibility because
+        # the manifest itself contains names and aliases.
         # ----------------------------------------------------
 
-        for character_id, data in characters.items():
+        index = manifest.get(
+            "search_index",
+            {},
+        )
+
+        if isinstance(
+            index,
+            dict,
+        ):
+
+            # Future-compatible embedded index support.
+            by_name = index.get(
+                "by_name",
+                {},
+            )
+
+            if isinstance(
+                by_name,
+                dict,
+            ):
+
+                character_id = (
+                    by_name.get(
+                        query_key
+                    )
+                )
+
+                if (
+                    character_id
+                    in characters
+                ):
+
+                    data = characters[
+                        character_id
+                    ]
+
+                    if isinstance(
+                        data,
+                        dict,
+                    ):
+
+                        return (
+                            character_id,
+                            data,
+                        )
+
+            by_alias = index.get(
+                "by_alias",
+                {},
+            )
+
+            if isinstance(
+                by_alias,
+                dict,
+            ):
+
+                character_id = (
+                    by_alias.get(
+                        query_key
+                    )
+                )
+
+                if (
+                    character_id
+                    in characters
+                ):
+
+                    data = characters[
+                        character_id
+                    ]
+
+                    if isinstance(
+                        data,
+                        dict,
+                    ):
+
+                        return (
+                            character_id,
+                            data,
+                        )
+
+        # ----------------------------------------------------
+        # 3. Exact canonical name / aliases
+        # ----------------------------------------------------
+
+        for character_id, data in (
+            characters.items()
+        ):
 
             if not isinstance(
                 data,
@@ -482,7 +837,7 @@ class DoraemonImageDatabase:
             ):
 
                 return (
-                    character_id,
+                    str(character_id),
                     data,
                 )
 
@@ -506,17 +861,25 @@ class DoraemonImageDatabase:
                     ):
 
                         return (
-                            character_id,
+                            str(character_id),
                             data,
                         )
 
         # ----------------------------------------------------
-        # Partial fallback
+        # 4. Partial match
         # ----------------------------------------------------
 
-        matches = []
+        matches: list[
+            tuple[
+                int,
+                str,
+                dict[str, Any],
+            ]
+        ] = []
 
-        for character_id, data in characters.items():
+        for character_id, data in (
+            characters.items()
+        ):
 
             if not isinstance(
                 data,
@@ -542,15 +905,20 @@ class DoraemonImageDatabase:
                 aliases,
                 list,
             ):
+
                 values.extend(
                     str(alias)
                     for alias in aliases
                 )
 
+            matched = False
+
             for value in values:
 
-                normalized = normalize_name(
-                    value
+                normalized = (
+                    normalize_name(
+                        value
+                    )
                 )
 
                 if (
@@ -560,13 +928,22 @@ class DoraemonImageDatabase:
 
                     matches.append(
                         (
-                            len(normalized),
-                            character_id,
+                            len(
+                                normalized
+                            ),
+                            str(
+                                character_id
+                            ),
                             data,
                         )
                     )
 
+                    matched = True
+
                     break
+
+            if matched:
+                continue
 
         if not matches:
             return None
@@ -584,7 +961,167 @@ class DoraemonImageDatabase:
         )
 
     # ========================================================
-    # Get images
+    # IMAGE CONVERSION
+    # ========================================================
+
+    @staticmethod
+    def _convert_image(
+        character_id: str,
+        character_name: str,
+        item: dict[str, Any],
+    ) -> Optional[
+        DoraemonImage
+    ]:
+
+        url = str(
+            item.get(
+                "url",
+                "",
+            )
+        ).strip()
+
+        if not is_allowed_image_url(
+            url
+        ):
+
+            logger.warning(
+                "Rejected image URL for "
+                "%s: %s",
+                character_name,
+                url,
+            )
+
+            return None
+
+        image_id = str(
+            item.get(
+                "id",
+                "",
+            )
+        ).strip()
+
+        # ----------------------------------------------------
+        # Older manifests might theoretically omit "id".
+        # Construct a deterministic fallback instead of
+        # throwing away an otherwise valid image.
+        # ----------------------------------------------------
+
+        if not image_id:
+
+            filename = str(
+                item.get(
+                    "filename",
+                    "",
+                )
+            ).strip()
+
+            if filename:
+
+                image_id = (
+                    f"{character_id}-"
+                    f"{normalize_name(filename)}"
+                )
+
+            else:
+
+                image_id = (
+                    f"{character_id}-"
+                    f"{abs(hash(url))}"
+                )
+
+        try:
+
+            width = int(
+                item.get(
+                    "width",
+                    0,
+                )
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            width = 0
+
+        try:
+
+            height = int(
+                item.get(
+                    "height",
+                    0,
+                )
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            height = 0
+
+        try:
+
+            byte_count = int(
+                item.get(
+                    "bytes",
+                    0,
+                )
+                or 0
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            byte_count = 0
+
+        return DoraemonImage(
+            image_id=image_id,
+            character_id=character_id,
+            character_name=character_name,
+            filename=str(
+                item.get(
+                    "filename",
+                    "",
+                )
+            ),
+            url=url,
+            width=width,
+            height=height,
+            source=str(
+                item.get(
+                    "source",
+                    "",
+                )
+            ),
+            source_url=str(
+                item.get(
+                    "source_url",
+                    "",
+                )
+            ),
+            format=str(
+                item.get(
+                    "format",
+                    "",
+                )
+            ),
+            bytes=byte_count,
+            sha256=str(
+                item.get(
+                    "sha256",
+                    "",
+                )
+            ),
+        )
+
+    # ========================================================
+    # GET IMAGES
     # ========================================================
 
     async def get_images(
@@ -597,8 +1134,18 @@ class DoraemonImageDatabase:
         list[DoraemonImage],
     ]:
 
-        result = await self.find_character(
-            query
+        limit = max(
+            1,
+            min(
+                int(limit),
+                MAX_IMAGES_PER_GALLERY,
+            ),
+        )
+
+        result = (
+            await self.find_character(
+                query
+            )
         )
 
         if result is None:
@@ -626,6 +1173,7 @@ class DoraemonImageDatabase:
             raw_images,
             list,
         ):
+
             raw_images = []
 
         images: list[
@@ -642,94 +1190,24 @@ class DoraemonImageDatabase:
             ):
                 continue
 
-            url = str(
-                item.get(
-                    "url",
-                    "",
-                )
+            image = self._convert_image(
+                character_id,
+                character_name,
+                item,
             )
 
-            if not is_allowed_image_url(
-                url
-            ):
-
-                logger.warning(
-                    "Rejected non-GitHub "
-                    "image URL for %s: %s",
-                    character_name,
-                    url,
-                )
-
+            if image is None:
                 continue
 
-            if url in seen_urls:
+            if image.url in seen_urls:
                 continue
 
-            image_id = str(
-                item.get(
-                    "id",
-                    "",
-                )
+            seen_urls.add(
+                image.url
             )
-
-            if not image_id:
-                continue
-
-            seen_urls.add(url)
-
-            try:
-
-                width = int(
-                    item.get(
-                        "width",
-                        0,
-                    )
-                    or 0
-                )
-
-            except (
-                TypeError,
-                ValueError,
-            ):
-                width = 0
-
-            try:
-
-                height = int(
-                    item.get(
-                        "height",
-                        0,
-                    )
-                    or 0
-                )
-
-            except (
-                TypeError,
-                ValueError,
-            ):
-                height = 0
 
             images.append(
-                DoraemonImage(
-                    image_id=image_id,
-                    character_id=character_id,
-                    character_name=character_name,
-                    filename=str(
-                        item.get(
-                            "filename",
-                            "",
-                        )
-                    ),
-                    url=url,
-                    width=width,
-                    height=height,
-                    source=str(
-                        item.get(
-                            "source",
-                            "",
-                        )
-                    ),
-                )
+                image
             )
 
             if len(images) >= limit:
@@ -748,14 +1226,49 @@ class DoraemonImageDatabase:
         )
 
     # ========================================================
-    # Statistics
+    # FIND ONE IMAGE
     # ========================================================
 
-    async def statistics(
+    async def get_first_image(
         self,
-    ) -> dict[str, int]:
+        query: str,
+    ) -> DoraemonImage:
 
-        manifest = await self.get_manifest()
+        _, images = (
+            await self.get_images(
+                query,
+                limit=1,
+            )
+        )
+
+        return images[0]
+
+    # ========================================================
+    # SEARCH MULTIPLE CHARACTERS
+    # ========================================================
+
+    async def search_characters(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+    ) -> list[
+        tuple[
+            str,
+            dict[str, Any],
+        ]
+    ]:
+
+        query_key = normalize_name(
+            query
+        )
+
+        if not query_key:
+            return []
+
+        manifest = (
+            await self.get_manifest()
+        )
 
         characters = manifest.get(
             "characters",
@@ -766,15 +1279,196 @@ class DoraemonImageDatabase:
             characters,
             dict,
         ):
+            return []
+
+        results: list[
+            tuple[
+                float,
+                str,
+                dict[str, Any],
+            ]
+        ] = []
+
+        for character_id, data in (
+            characters.items()
+        ):
+
+            if not isinstance(
+                data,
+                dict,
+            ):
+                continue
+
+            name = str(
+                data.get(
+                    "name",
+                    "",
+                )
+            )
+
+            aliases = data.get(
+                "aliases",
+                [],
+            )
+
+            if not isinstance(
+                aliases,
+                list,
+            ):
+
+                aliases = []
+
+            names = [
+                name,
+                *(
+                    str(alias)
+                    for alias in aliases
+                ),
+            ]
+
+            normalized_names = [
+                normalize_name(
+                    value
+                )
+                for value in names
+                if value
+            ]
+
+            score = 0.0
+
+            for normalized in (
+                normalized_names
+            ):
+
+                if not normalized:
+                    continue
+
+                if normalized == query_key:
+
+                    score = max(
+                        score,
+                        1000.0,
+                    )
+
+                elif normalized.startswith(
+                    query_key
+                ):
+
+                    score = max(
+                        score,
+                        700.0,
+                    )
+
+                elif query_key in normalized:
+
+                    score = max(
+                        score,
+                        500.0,
+                    )
+
+                else:
+
+                    query_tokens = set(
+                        query_key.split(
+                            "-"
+                        )
+                    )
+
+                    name_tokens = set(
+                        normalized.split(
+                            "-"
+                        )
+                    )
+
+                    overlap = (
+                        query_tokens
+                        & name_tokens
+                    )
+
+                    if overlap:
+
+                        score = max(
+                            score,
+                            100.0
+                            * (
+                                len(overlap)
+                                /
+                                max(
+                                    1,
+                                    len(
+                                        query_tokens
+                                    )
+                                )
+                            ),
+                        )
+
+            if score <= 0:
+                continue
+
+            results.append(
+                (
+                    score,
+                    str(
+                        character_id
+                    ),
+                    data,
+                )
+            )
+
+        results.sort(
+            key=lambda item: (
+                -item[0],
+                item[1],
+            )
+        )
+
+        return [
+            (
+                character_id,
+                data,
+            )
+            for _, character_id, data
+            in results[:limit]
+        ]
+
+    # ========================================================
+    # STATISTICS
+    # ========================================================
+
+    async def statistics(
+        self,
+    ) -> dict[str, int]:
+
+        manifest = (
+            await self.get_manifest()
+        )
+
+        characters = manifest.get(
+            "characters",
+            {},
+        )
+
+        if not isinstance(
+            characters,
+            dict,
+        ):
+
             return {
                 "characters": 0,
+                "characters_with_images": 0,
+                "characters_without_images": 0,
                 "images": 0,
             }
 
         character_count = 0
+
+        characters_with_images = 0
+
         image_count = 0
 
-        for data in characters.values():
+        for data in (
+            characters.values()
+        ):
 
             if not isinstance(
                 data,
@@ -793,11 +1487,34 @@ class DoraemonImageDatabase:
                 images,
                 list,
             ):
-                image_count += len(
+
+                count = len(
                     images
                 )
 
+                image_count += count
+
+                if count > 0:
+
+                    characters_with_images += 1
+
         return {
             "characters": character_count,
+            "characters_with_images": (
+                characters_with_images
+            ),
+            "characters_without_images": (
+                character_count
+                - characters_with_images
+            ),
             "images": image_count,
-}
+        }
+
+
+# ============================================================
+# GLOBAL INSTANCE
+# ============================================================
+
+image_database = (
+    DoraemonImageDatabase()
+)
