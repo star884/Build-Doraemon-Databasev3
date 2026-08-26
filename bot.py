@@ -57,6 +57,8 @@ from discord import app_commands, Embed, Intents, ui, Interaction, ButtonStyle
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
+from doraemon_images import DoraemonImageDatabase
+
 # External dependencies (optional)
 try:
     import aiohttp
@@ -146,6 +148,13 @@ CHAR_CSV_RAW_URL = (
     f'{CHAR_CSV_REPO_OWNER}/{CHAR_CSV_REPO_NAME}/'
     f'{CHAR_CSV_BRANCH}/{CHAR_CSV_FILENAME}'
 )
+
+
+# ============================================
+# CHARACTER IMAGE DATABASE
+# ============================================
+
+image_database = DoraemonImageDatabase()
 
 
 # ============================================
@@ -2484,6 +2493,11 @@ if os.getenv('GITHUB_ACTIONS') == 'true':
 CFG = BotConfig()
 logger = setup_logging(CFG)
 
+# Character image database client.
+# Initialized after load_dotenv() so IMAGE_* environment
+# variables from .env are available.
+image_database = DoraemonImageDatabase()
+
 # Validate config with strict error handling
 config_warnings = CFG.validate()
 for warning in config_warnings:
@@ -2584,6 +2598,15 @@ async def _async_shutdown():
     except Exception as e:
         logger.warning(f'Failed to close cache: {e}')
     
+        try:
+        if image_database is not None:
+            await image_database.close()
+            logger.info('Character image database client closed.')
+    except Exception as e:
+        logger.warning(
+            f'Failed to close character image database client: {e}'
+        )
+
     try:
         await bot.close()
         logger.info('Bot gateway closed.')
@@ -2624,11 +2647,17 @@ async def _async_shutdown() -> None:
         pass
 
     try:
+        if image_database is not None:
+            await image_database.close()
+            logger.info('Character image database client closed.')
+    except Exception:
+        pass
+
+    try:
         await bot.close()
         logger.info('Bot gateway closed.')
     except Exception:
         pass
-
     logger.info('Graceful shutdown complete. Goodbye!')
     os._exit(0)
 
@@ -2721,8 +2750,235 @@ async def autocomplete_search(
     return []
 
 # ============================================
-# SOURCE MANAGEMENT COMMANDS
+# CHARACTER IMAGE GALLERY
 # ============================================
+
+class CharacterImageView(ui.View):
+
+    def __init__(
+        self,
+        images,
+        user_id: int,
+        timeout: float = 180,
+    ):
+        super().__init__(timeout=timeout)
+
+        self.images = images
+        self.user_id = user_id
+        self.index = 0
+
+        self._update_buttons()
+
+    async def interaction_check(
+        self,
+        interaction: Interaction,
+    ) -> bool:
+
+        if interaction.user.id != self.user_id:
+
+            await interaction.response.send_message(
+                "This image gallery belongs to another user.",
+                ephemeral=True,
+            )
+
+            return False
+
+        return True
+
+    def build_embed(self) -> Embed:
+
+        image = self.images[self.index]
+
+        embed = Embed(
+            title=f"🖼️ {image.character_name}",
+            description=(
+                f"Image **{self.index + 1}** "
+                f"of **{len(self.images)}**"
+            ),
+            color=CFG.color_primary,
+        )
+
+        embed.set_image(url=image.url)
+
+        if image.width > 0 and image.height > 0:
+
+            embed.set_footer(
+                text=(
+                    f"{image.width}×{image.height}"
+                    f" • {image.filename}"
+                )
+            )
+
+        elif image.filename:
+
+            embed.set_footer(
+                text=image.filename
+            )
+
+        return embed
+
+    def _update_buttons(self) -> None:
+
+        self.first_button.disabled = self.index <= 0
+        self.previous_button.disabled = self.index <= 0
+
+        self.next_button.disabled = (
+            self.index >= len(self.images) - 1
+        )
+
+        self.last_button.disabled = (
+            self.index >= len(self.images) - 1
+        )
+
+    async def _refresh(
+        self,
+        interaction: Interaction,
+    ) -> None:
+
+        self._update_buttons()
+
+        await interaction.response.edit_message(
+            embed=self.build_embed(),
+            view=self,
+        )
+
+    @ui.button(
+        label="⏮",
+        style=ButtonStyle.secondary,
+    )
+    async def first_button(
+        self,
+        interaction: Interaction,
+        button: ui.Button,
+    ) -> None:
+
+        self.index = 0
+
+        await self._refresh(interaction)
+
+    @ui.button(
+        label="◀",
+        style=ButtonStyle.secondary,
+    )
+    async def previous_button(
+        self,
+        interaction: Interaction,
+        button: ui.Button,
+    ) -> None:
+
+        if self.index > 0:
+            self.index -= 1
+
+        await self._refresh(interaction)
+
+    @ui.button(
+        label="▶",
+        style=ButtonStyle.primary,
+    )
+    async def next_button(
+        self,
+        interaction: Interaction,
+        button: ui.Button,
+    ) -> None:
+
+        if self.index < len(self.images) - 1:
+            self.index += 1
+
+        await self._refresh(interaction)
+
+    @ui.button(
+        label="⏭",
+        style=ButtonStyle.secondary,
+    )
+    async def last_button(
+        self,
+        interaction: Interaction,
+        button: ui.Button,
+    ) -> None:
+
+        self.index = len(self.images) - 1
+
+        await self._refresh(interaction)
+
+    async def on_timeout(self) -> None:
+
+        for child in self.children:
+
+            if isinstance(child, ui.Button):
+                child.disabled = True
+
+
+# ============================================
+# CHARACTER IMAGE GALLERY COMMAND
+# ============================================
+
+@bot.tree.command(
+    name='gallery',
+    description='Show images of a Doraemon character'
+)
+@app_commands.describe(
+    character='Character name, alternative name, or partial name'
+)
+async def gallery_cmd(
+    interaction: discord.Interaction,
+    character: str
+):
+    await interaction.response.defer()
+
+    try:
+
+        character_name, images = (
+            await image_database.get_images(
+                character
+            )
+        )
+
+    except LookupError as exc:
+
+        embed = Embed(
+            title='No Images Found',
+            description=str(exc),
+            color=CFG.color_warning,
+        )
+
+        await interaction.followup.send(
+            embed=embed,
+            ephemeral=True,
+        )
+
+        return
+
+    except Exception:
+
+        logger.exception(
+            'Image gallery lookup failed for query %r',
+            character,
+        )
+
+        embed = Embed(
+            title='Image Database Error',
+            description=(
+                'The character image database could not '
+                'be loaded right now. Please try again later.'
+            ),
+            color=CFG.color_error,
+        )
+
+        await interaction.followup.send(
+            embed=embed,
+            ephemeral=True,
+        )
+
+        return
+
+    view = CharacterImageView(
+        images=images,
+        user_id=interaction.user.id,
+        timeout=180,
+    )
+
+    await interaction.followup.send(
+        embed=view.buil
 
 @bot.tree.command(name='source', description='Shows the current database source')
 @rate_limited('source')
@@ -4175,73 +4431,270 @@ async def search_volume_cmd(
 # CHARACTER-SPECIFIC COMMANDS
 # ============================================
 
-@bot.tree.command(name='character', description='Search for a character by name (Characters source only)')
-@app_commands.describe(name='Character name or keyword')
-@app_commands.autocomplete(name=autocomplete_character_names)
+@bot.tree.command(
+    name='character',
+    description='Search for a character by name (Characters source only)'
+)
+@app_commands.describe(
+    name='Character name or keyword'
+)
+@app_commands.autocomplete(
+    name=autocomplete_character_names
+)
 @rate_limited('character')
-async def character_cmd(interaction: discord.Interaction, name: str):
+async def character_cmd(
+    interaction: discord.Interaction,
+    name: str
+):
     is_available, error_embed = dm.check_char_source()
+
     if not is_available:
-        await interaction.response.send_message(embed=error_embed)
+        await interaction.response.send_message(
+            embed=error_embed
+        )
         return
+
     await interaction.response.defer()
 
     q = sanitize_query(name)
+
     if not q:
-        embed = Embed(title='Empty Query',
-                      description='Please provide a character name.',
-                      color=CFG.color_error)
-        await interaction.followup.send(embed=embed)
+        embed = Embed(
+            title='Empty Query',
+            description='Please provide a character name.',
+            color=CFG.color_error
+        )
+
+        await interaction.followup.send(
+            embed=embed
+        )
         return
 
     q_lower = q.lower()
 
-    results = search_characters(q_lower, dm.char_data, use_word_boundary=True, use_fuzzy=True)
+    results = search_characters(
+        q_lower,
+        dm.char_data,
+        use_word_boundary=True,
+        use_fuzzy=True
+    )
 
     if not results:
         embed = Embed(
             title='No Results Found',
-            description=f'No characters found for "**{q}**"\n\n'
-                        '**Tips:**\n'
-                        '- Try full name: `nobita nobi` vs just `nobita`\n'
-                        '- Use category: `robot`, `human`, `animal`\n'
-                        '- Search keywords from descriptions',
+            description=(
+                f'No characters found for "**{q}**"\n\n'
+                '**Tips:**\n'
+                '- Try full name: `nobita nobi` vs just `nobita`\n'
+                '- Use category: `robot`, `human`, `animal`\n'
+                '- Search keywords from descriptions'
+            ),
             color=CFG.color_error
         )
+
         embed.timestamp = utc_now()
-        await interaction.followup.send(embed=embed)
+
+        await interaction.followup.send(
+            embed=embed
+        )
         return
 
     first = results[0]
-    char_name = first.get('Character Name', 'Unknown') or 'Unknown'
-    alt_name = first.get('Alternative Name', '') or ''
-    category = first.get('Category', 'Unknown') or 'Unknown'
-    description = first.get('Description', '') or ''
-    references = first.get('Source References', '') or ''
 
-    embed = Embed(title=f'Character: {truncate(char_name, 70)}', color=CFG.color_primary)
+    char_name = (
+        first.get(
+            'Character Name',
+            'Unknown'
+        )
+        or 'Unknown'
+    )
+
+    alt_name = (
+        first.get(
+            'Alternative Name',
+            ''
+        )
+        or ''
+    )
+
+    category = (
+        first.get(
+            'Category',
+            'Unknown'
+        )
+        or 'Unknown'
+    )
+
+    description = (
+        first.get(
+            'Description',
+            ''
+        )
+        or ''
+    )
+
+    references = (
+        first.get(
+            'Source References',
+            ''
+        )
+        or ''
+    )
+
+    embed = Embed(
+        title=(
+            f'Character: '
+            f'{truncate(char_name, 70)}'
+        ),
+        color=CFG.color_primary
+    )
+
     embed.timestamp = utc_now()
-    embed.add_field(name='Alternative Name', value=alt_name or 'N/A', inline=True)
-    embed.add_field(name='Category', value=category, inline=True)
-    safe_add_field(embed, name='Description', value=truncate(description, CFG.embed_field_value_max), inline=False)
+
+    embed.add_field(
+        name='Alternative Name',
+        value=alt_name or 'N/A',
+        inline=True
+    )
+
+    embed.add_field(
+        name='Category',
+        value=category,
+        inline=True
+    )
+
+    safe_add_field(
+        embed,
+        name='Description',
+        value=truncate(
+            description,
+            CFG.embed_field_value_max
+        ),
+        inline=False
+    )
+
     if references:
-        safe_add_field(embed, name='Source References', value=truncate(references, CFG.embed_field_value_max), inline=False)
+        safe_add_field(
+            embed,
+            name='Source References',
+            value=truncate(
+                references,
+                CFG.embed_field_value_max
+            ),
+            inline=False
+        )
+
+    # --------------------------------------------------------
+    # CHARACTER IMAGE
+    #
+    # Only use the image database when we have a single
+    # unambiguous character result. This prevents the first
+    # search result's image from being incorrectly displayed
+    # when the query matches multiple characters.
+    # --------------------------------------------------------
+
+    if len(results) == 1 and image_database is not None:
+
+        try:
+
+            image_character_name, images = (
+                await image_database.get_images(
+                    char_name,
+                    limit=1
+                )
+            )
+
+            if images:
+
+                image = images[0]
+
+                embed.set_image(
+                    url=image.url
+                )
+
+                logger.debug(
+                    'Added character image for %s: %s',
+                    image_character_name,
+                    image.url
+                )
+
+        except LookupError:
+
+            # Character exists in the character database,
+            # but the image repository does not currently
+            # have a published image.
+            logger.debug(
+                'No published image found for character: %s',
+                char_name
+            )
+
+        except Exception:
+
+            # Image problems must NEVER break the normal
+            # character search command.
+            logger.exception(
+                'Failed to load character image for: %s',
+                char_name
+            )
+
+    # --------------------------------------------------------
+    # Multiple search results
+    # --------------------------------------------------------
 
     if len(results) > 1:
-        # Use select menu instead of plain text
-        view = ResultSelectView(results[:25], SourceType.CSV_CHAR.value, original_user_id=interaction.user.id)
+
+        view = ResultSelectView(
+            results[:25],
+            SourceType.CSV_CHAR.value,
+            original_user_id=interaction.user.id
+        )
+
         additional = '\n'.join(
-            f'- {r.get("Character Name", "?") or "?"} [{r.get("Category", "") or ""}]'
+            f'- {r.get("Character Name", "?") or "?"} '
+            f'[{r.get("Category", "") or ""}]'
             for r in results[1:6]
         )
-        safe_add_field(embed, name=f'More Matches ({len(results) - 1})', value=additional, inline=False)
-        embed.set_footer(text=f'Matches: {len(results)} | Use dropdown to view details | Source: {dm.current_source["name"]}')
-        await interaction.followup.send(embed=embed, view=view)
-        view.message = await interaction.original_response()
+
+        safe_add_field(
+            embed,
+            name=f'More Matches ({len(results) - 1})',
+            value=additional,
+            inline=False
+        )
+
+        embed.set_footer(
+            text=(
+                f'Matches: {len(results)} | '
+                f'Use dropdown to view details | '
+                f'Source: {dm.current_source["name"]}'
+            )
+        )
+
+        await interaction.followup.send(
+            embed=embed,
+            view=view
+        )
+
+        view.message = (
+            await interaction.original_response()
+        )
+
         return
 
-    embed.set_footer(text=f'Matches: {len(results)} | Source: {dm.current_source["name"]}')
-    await interaction.followup.send(embed=embed)
+    # --------------------------------------------------------
+    # Single character result
+    # --------------------------------------------------------
+
+    embed.set_footer(
+        text=(
+            f'Matches: {len(results)} | '
+            f'Source: {dm.current_source["name"]}'
+        )
+    )
+
+    await interaction.followup.send(
+        embed=embed
+    )
 
 @bot.tree.command(name='characters_by_category', description='List characters filtered by category (Characters source only)')
 @app_commands.describe(category='Category name (e.g., human, robot, animal)')
